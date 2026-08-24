@@ -15,6 +15,7 @@ All plugins are designed with strict performance budgets, zero-slop UI aesthetic
 | **`eipi10.battery-info`** | **Battery Info** | `System` | Live battery charging/discharging wattage, battery state indicators, and daily/weekly/monthly energy consumption metrics. | [`plugins/eipi10.battery-info/`](plugins/eipi10.battery-info/) |
 | **`qwen-asr`** | **Qwen ASR** | `Utility` | Push-to-talk Qwen Audio 3.0 speech recognition with acoustic level visualizer, global `F9` keybinding, and clipboard output. | [`plugins/qwen-asr/`](plugins/qwen-asr/) |
 | **`eipi10.netrate`** | **Network Rate** | `Network` | Ultra-lightweight, zero-jitter network upload and download speed monitor sampled directly from `/sys/class/net`. | [`plugins/eipi10.netrate/`](plugins/eipi10.netrate/) |
+| **`eipi10.365vpn`** | **365VPN** | `Network` | Native bar status for the official 365VPN client: shows connection state (connected/open/ready/stopped/missing) and launches the vendor GUI. | [`plugins/eipi10.365vpn/`](plugins/eipi10.365vpn/) |
 
 ---
 

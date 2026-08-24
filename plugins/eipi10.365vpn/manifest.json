@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "eipi10.365vpn",
+  "name": "365VPN",
+  "version": "1.0.0",
+  "author": "eipi10",
+  "description": "Native Omarchy bar status for the 365VPN desktop client.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Vpn365.qml"
+  },
+  "barWidget": {
+    "displayName": "365VPN",
+    "description": "Show 365VPN state and open the full client",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

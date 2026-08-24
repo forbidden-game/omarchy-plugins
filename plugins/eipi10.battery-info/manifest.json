@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "eipi10.battery-info",
+  "name": "Battery info",
+  "version": "1.0.0",
+  "author": "eipi10",
+  "description": "Battery icon with live charging power and daily/weekly/monthly consumption.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BatteryInfo.qml"
+  },
+  "barWidget": {
+    "displayName": "Battery info",
+    "description": "Battery icon, charging power, and daily/weekly/monthly battery consumption",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

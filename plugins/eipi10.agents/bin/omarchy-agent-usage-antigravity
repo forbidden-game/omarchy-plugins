@@ -1,0 +1,855 @@
+#!/usr/bin/python3
+# omarchy:summary=Print Antigravity usage, quota, and multi-account state as JSON
+# omarchy:args=[--force] [--limits-only]
+# omarchy:hidden=true
+"""Collect Antigravity usage, Gemini 3.7 Flash quota, and account list into one display-ready JSON record.
+
+Local stats scan all native Codex CLI sessions, pi/omp sessions, opencode sessions,
+and agy (Antigravity) conversations to form a complete machine-wide model usage record.
+Accounts and quota limits come from ~/.antigravity_tools/accounts.json and accounts/*.json.
+"""
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+AGENT_ID = "antigravity"
+AGENT_NAME = "Antigravity"
+AUTH_HELP = "Add an account or run Antigravity to authenticate."
+
+HOME = Path.home()
+ANTIGRAVITY_DIR = HOME / ".config" / "omarchy" / "agents" / "antigravity"
+ACCOUNTS_INDEX = ANTIGRAVITY_DIR / "accounts.json"
+ACCOUNTS_DIR = ANTIGRAVITY_DIR / "accounts"
+LEGACY_DIR = HOME / ".antigravity_tools"
+PRICING_CONFIG = HOME / ".config" / "omarchy" / "agents" / "pricing.json"
+
+DEFAULT_PRICING = {
+    "gemini-3.7-flash": {"input": 0.75, "output": 3.75, "cacheRead": 0.075, "cacheWrite": 0.0},
+    "gemini-3.7-flash-high": {"input": 0.75, "output": 3.75, "cacheRead": 0.075, "cacheWrite": 0.0},
+    "gemini-3.7-flash-control": {"input": 0.75, "output": 3.75, "cacheRead": 0.075, "cacheWrite": 0.0},
+    "gemini-3.7-flash-low": {"input": 0.75, "output": 3.75, "cacheRead": 0.075, "cacheWrite": 0.0},
+    "gemini-3.7-flash-medium": {"input": 0.75, "output": 3.75, "cacheRead": 0.075, "cacheWrite": 0.0},
+    "gemini-3.7-flash-tiered": {"input": 0.75, "output": 3.75, "cacheRead": 0.075, "cacheWrite": 0.0},
+    "gemini-3.1-pro-high": {"input": 1.25, "output": 5.00, "cacheRead": 0.3125, "cacheWrite": 0.0},
+    "gemini-3.1-pro-low": {"input": 1.25, "output": 5.00, "cacheRead": 0.3125, "cacheWrite": 0.0},
+    "gemini-2.5-pro": {"input": 1.25, "output": 5.00, "cacheRead": 0.3125, "cacheWrite": 0.0},
+    "gemini-2.5-flash": {"input": 0.10, "output": 0.40, "cacheRead": 0.025, "cacheWrite": 0.0},
+    "gemini-default": {"input": 0.75, "output": 3.75, "cacheRead": 0.075, "cacheWrite": 0.0},
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "cacheRead": 0.30, "cacheWrite": 3.75},
+    "claude-opus-4-6-thinking": {"input": 15.00, "output": 75.00, "cacheRead": 1.50, "cacheWrite": 18.75},
+    "deepseek-v4-flash": {"input": 0.22, "output": 0.66, "cacheRead": 0.014, "cacheWrite": 0.0},
+    "gpt-5.6-sol": {"input": 4.00, "output": 20.00, "cacheRead": 0.40, "cacheWrite": 0.0},
+    "gpt-5.6-luna": {"input": 0.20, "output": 1.20, "cacheRead": 0.02, "cacheWrite": 0.0},
+    "gpt-oss-120b-medium": {"input": 0.50, "output": 2.00, "cacheRead": 0.05, "cacheWrite": 0.0},
+    "qwen38-ridge": {"input": 0.40, "output": 1.60, "cacheRead": 0.04, "cacheWrite": 0.0},
+    "stealth/ox-alpha": {"input": 0.50, "output": 2.00, "cacheRead": 0.05, "cacheWrite": 0.0}
+}
+
+
+def load_pricing_rates():
+    if PRICING_CONFIG.is_file():
+        try:
+            data = json.loads(PRICING_CONFIG.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data.get("models", data)
+        except Exception:
+            pass
+    return DEFAULT_PRICING
+
+
+RATES = load_pricing_rates()
+
+
+def calculate_cost(model_id, input_tokens, output_tokens, cache_read, cache_write=0):
+    clean = str(model_id or "").lower().replace("//", "/")
+    rate = RATES.get(clean)
+    if not rate:
+        for k, v in RATES.items():
+            if k in clean:
+                rate = v
+                break
+    if not rate:
+        rate = {"input": 0.5, "output": 2.0, "cacheRead": 0.05, "cacheWrite": 0.0}
+    c_in = (input_tokens / 1_000_000.0) * float(rate.get("input", 0))
+    c_out = (output_tokens / 1_000_000.0) * float(rate.get("output", 0))
+    c_cr = (cache_read / 1_000_000.0) * float(rate.get("cacheRead", 0))
+    c_cw = (cache_write / 1_000_000.0) * float(rate.get("cacheWrite", 0))
+    return round(c_in + c_out + c_cr + c_cw, 4)
+
+
+def local_day(value):
+    if value is None:
+        return datetime.now().strftime("%Y-%m-%d")
+    if isinstance(value, (int, float)):
+        if value > 10_000_000_000:
+            value = value / 1000
+        return datetime.fromtimestamp(value).strftime("%Y-%m-%d")
+    text = str(value)
+    try:
+        if text.endswith("Z"):
+            dt = datetime.fromisoformat(text[:-1] + "+00:00")
+        else:
+            dt = datetime.fromisoformat(text)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone()
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d")
+
+
+def number(value):
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
+
+
+def model_name(raw):
+    value = str(raw or "gemini-3.7-flash").strip()
+    clean = value.lower().replace("//", "/")
+    if "gemini-3.7-flash" in clean or "gemini-3-7-flash" in clean:
+        return "gemini-3.7-flash"
+    return value if value else "gemini-3.7-flash"
+
+
+now = datetime.now()
+today = now.strftime("%Y-%m-%d")
+recent_dates = [(now - timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(6, -1, -1)]
+
+recent = {
+    day: {
+        "date": day,
+        "messageCount": 0,
+        "totalCost": 0.0,
+        "models": {}
+    }
+    for day in recent_dates
+}
+
+today_tokens_by_model = {}
+today_model_usage = {}
+model_usage = {}
+today_sessions = set()
+active_days = set()
+
+today_prompts = 0
+today_total_tokens = 0
+total_prompts = 0
+total_sessions = set()
+seen_pi_messages = set()
+
+
+def add_usage(day, session_key, model, input_tokens, output_tokens, cache_read, cache_write):
+    global today_prompts, today_total_tokens, total_prompts
+    total = input_tokens + output_tokens + cache_read + cache_write
+    if total <= 0:
+        return
+
+    total_prompts += 1
+    total_sessions.add(session_key)
+    active_days.add(day)
+
+    bucket = model_usage.setdefault(model, {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+    })
+    bucket["inputTokens"] += input_tokens
+    bucket["outputTokens"] += output_tokens
+    bucket["cacheReadInputTokens"] += cache_read
+    bucket["cacheCreationInputTokens"] += cache_write
+
+    cost = calculate_cost(model, input_tokens, output_tokens, cache_read, cache_write)
+
+    if day in recent:
+        recent[day]["messageCount"] += total
+        recent[day]["totalCost"] = round(recent[day]["totalCost"] + cost, 4)
+        m_entry = recent[day]["models"].setdefault(model, {"tokens": 0, "cost": 0.0})
+        m_entry["tokens"] += total
+        m_entry["cost"] = round(m_entry["cost"] + cost, 4)
+
+    if day == today:
+        today_prompts += 1
+        today_sessions.add(session_key)
+        today_total_tokens += total
+        today_tokens_by_model[model] = today_tokens_by_model.get(model, 0) + total
+        today_bucket = today_model_usage.setdefault(model, {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+        })
+        today_bucket["inputTokens"] += input_tokens
+        today_bucket["outputTokens"] += output_tokens
+        today_bucket["cacheReadInputTokens"] += cache_read
+        today_bucket["cacheCreationInputTokens"] += cache_write
+
+
+def decode_varint(buf, pos):
+    val = 0
+    shift = 0
+    while pos < len(buf):
+        b = buf[pos]
+        pos += 1
+        val |= (b & 0x7F) << shift
+        shift += 7
+        if (b & 0x80) == 0:
+            return val, pos
+    return None, pos
+
+
+def parse_proto(buf):
+    pos = 0
+    fields = []
+    while pos < len(buf):
+        tag, pos = decode_varint(buf, pos)
+        if tag is None:
+            break
+        wire_type = tag & 0x7
+        field_num = tag >> 3
+        if wire_type == 0:
+            val, pos = decode_varint(buf, pos)
+            if val is None:
+                break
+            fields.append((field_num, "varint", val))
+        elif wire_type == 1:
+            if pos + 8 > len(buf):
+                break
+            val = buf[pos : pos + 8]
+            pos += 8
+            fields.append((field_num, "fixed64", val))
+        elif wire_type == 2:
+            length, pos = decode_varint(buf, pos)
+            if length is None or pos + length > len(buf):
+                break
+            val = buf[pos : pos + length]
+            pos += length
+            fields.append((field_num, "bytes", val))
+        elif wire_type == 5:
+            if pos + 4 > len(buf):
+                break
+            val = buf[pos : pos + 4]
+            pos += 4
+            fields.append((field_num, "fixed32", val))
+        else:
+            break
+    return fields
+
+
+def scan_agy_sessions():
+    conv_dir = HOME / ".gemini" / "antigravity-cli" / "conversations"
+    if not conv_dir.is_dir():
+        return True
+    cutoff = time.time() - 30 * 24 * 60 * 60
+    db_files = []
+    try:
+        for path in conv_dir.glob("*.db"):
+            try:
+                if path.stat().st_mtime >= cutoff:
+                    db_files.append(path)
+            except OSError:
+                pass
+    except OSError:
+        return False
+
+    all_complete = True
+    for db_path in db_files:
+        try:
+            conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+        except sqlite3.Error:
+            all_complete = False
+            continue
+        try:
+            conn.execute("PRAGMA query_only = ON")
+            step_timestamps = {}
+            try:
+                for row in conn.execute("SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL"):
+                    idx, meta = row
+                    if not meta:
+                        continue
+                    for fn, ft, fv in parse_proto(meta):
+                        if fn == 1 and ft == "bytes":
+                            for tfn, tft, tfv in parse_proto(fv):
+                                if tfn == 1 and tft == "varint":
+                                    step_timestamps[idx] = tfv
+            except sqlite3.Error:
+                pass
+
+            file_mtime = db_path.stat().st_mtime
+            session_key = "agy:" + db_path.stem
+
+            for row in conn.execute("SELECT idx, data FROM gen_metadata WHERE data IS NOT NULL"):
+                idx, data = row
+                if not data:
+                    continue
+                top = parse_proto(data)
+                f1 = next((fv for fn, ft, fv in top if fn == 1 and ft == "bytes"), None)
+                if not f1:
+                    continue
+                f1_fields = parse_proto(f1)
+                model = "gemini-3.7-flash"
+                tokens_f4 = None
+                last_step_index = None
+                for fn, ft, fv in f1_fields:
+                    if fn == 19:
+                        try:
+                            model = fv.decode("utf-8", errors="replace")
+                        except Exception:
+                            pass
+                    elif fn == 4:
+                        tokens_f4 = parse_proto(fv)
+                    elif fn == 20:
+                        try:
+                            m = parse_proto(fv)
+                            if len(m) > 1 and m[0][2].decode("utf-8", errors="replace") == "last_step_index":
+                                last_step_index = int(m[1][2].decode("utf-8", errors="replace"))
+                        except Exception:
+                            pass
+
+                if not tokens_f4:
+                    continue
+                input_tokens = next((tfv for tfn, tft, tfv in tokens_f4 if tfn == 2), 0)
+                output_tokens = next((tfv for tfn, tft, tfv in tokens_f4 if tfn == 3), 0)
+                cache_read = next((tfv for tfn, tft, tfv in tokens_f4 if tfn == 5), 0)
+                cache_write = next((tfv for tfn, tft, tfv in tokens_f4 if tfn == 6), 0)
+                if not (input_tokens or output_tokens or cache_read or cache_write):
+                    continue
+
+                ts = step_timestamps.get(last_step_index, file_mtime)
+                day = local_day(ts)
+                add_usage(day, session_key, model_name(model), input_tokens, output_tokens, cache_read, cache_write)
+        except sqlite3.Error:
+            all_complete = False
+        finally:
+            conn.close()
+
+    return all_complete
+
+
+def scan_pi_sessions():
+    roots = [
+        HOME / ".pi" / "agent" / "sessions",
+        HOME / ".omp" / "agent" / "sessions",
+    ]
+    for root in roots:
+        if not root.exists():
+            continue
+        try:
+            proc = subprocess.Popen(
+                ["rg", "--json", "-e", r'"role"\s*:\s*"assistant"', str(root)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                errors="replace",
+            )
+        except FileNotFoundError:
+            return
+
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            try:
+                event = json.loads(raw)
+                if event.get("type") != "match":
+                    continue
+                line = event.get("data", {}).get("lines", {}).get("text", "")
+                path = event.get("data", {}).get("path", {}).get("text", "pi-session")
+                entry = json.loads(line)
+            except Exception:
+                continue
+
+            if entry.get("type") != "message":
+                continue
+            message_key = path + ":" + str(entry.get("id") or "")
+            if message_key in seen_pi_messages:
+                continue
+            seen_pi_messages.add(message_key)
+            message = entry.get("message") or {}
+            if message.get("role") != "assistant":
+                continue
+
+            usage = message.get("usage") or {}
+            if not usage:
+                continue
+            total = number(usage.get("totalTokens"))
+            input_tokens = number(usage.get("input"))
+            output_tokens = number(usage.get("output"))
+            cache_read = number(usage.get("cacheRead"))
+            cache_write = number(usage.get("cacheWrite"))
+            if total and not (input_tokens or output_tokens or cache_read or cache_write):
+                input_tokens = total
+            if not (input_tokens or output_tokens or cache_read or cache_write):
+                continue
+
+            day = local_day(entry.get("timestamp") or message.get("timestamp"))
+            add_usage(day, path, model_name(message.get("model")), input_tokens, output_tokens, cache_read, cache_write)
+
+        try:
+            proc.wait(timeout=1)
+        except Exception:
+            proc.kill()
+
+
+def scan_opencode_sessions():
+    db = (Path(os.environ.get("XDG_DATA_HOME") or (HOME / ".local" / "share"))) / "opencode" / "opencode.db"
+    if not db.is_file():
+        return True
+    try:
+        conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return False
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        for session_id, raw in conn.execute(
+            "SELECT session_id, data FROM message"
+            " WHERE data LIKE '%\"role\"%:%\"assistant\"%'"
+            " AND CASE WHEN json_valid(data) THEN json_extract(data, '$.role') END = 'assistant'"
+        ):
+            try:
+                entry = json.loads(raw)
+                if not isinstance(entry, dict) or entry.get("role") != "assistant":
+                    continue
+                tokens = entry.get("tokens") or {}
+                cache = tokens.get("cache") or {}
+                input_tokens = number(tokens.get("input"))
+                output_tokens = number(tokens.get("output")) + number(tokens.get("reasoning"))
+                cache_read = number(cache.get("read"))
+                cache_write = number(cache.get("write"))
+                if not (input_tokens or output_tokens or cache_read or cache_write):
+                    continue
+                day = local_day((entry.get("time") or {}).get("created"))
+                model = model_name(str(entry.get("modelID") or "").rstrip("/").split("/")[-1])
+            except Exception:
+                continue
+            add_usage(day, "opencode:" + str(session_id), model, input_tokens, output_tokens, cache_read, cache_write)
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+    return True
+
+
+def scan_native_codex_sessions():
+    codex_home = Path(os.environ.get("CODEX_HOME") or (HOME / ".codex"))
+    roots = [codex_home / "sessions", codex_home / "archived_sessions"]
+    files = []
+    cutoff = time.time() - 30 * 24 * 60 * 60
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*.jsonl"):
+            try:
+                if path.stat().st_mtime >= cutoff:
+                    files.append(path)
+            except OSError:
+                pass
+
+    for path in files:
+        current_model = "codex"
+        try:
+            with path.open(errors="replace") as handle:
+                for raw in handle:
+                    if "token_count" not in raw and "turn_context" not in raw:
+                        continue
+                    try:
+                        entry = json.loads(raw)
+                    except Exception:
+                        continue
+                    if entry.get("type") == "turn_context":
+                        payload = entry.get("payload") or {}
+                        current_model = model_name(payload.get("model") or payload.get("model_slug") or current_model)
+                        continue
+                    payload = entry.get("payload") or entry
+                    if entry.get("type") == "response_item" and isinstance(payload, dict):
+                        payload = payload.get("payload") or payload
+                    if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                        continue
+                    info = payload.get("info") or {}
+                    usage = info.get("last_token_usage") or {}
+                    cache_read = number(usage.get("cached_input_tokens"))
+                    cache_write = number(usage.get("cache_write_input_tokens"))
+                    input_tokens = max(0, number(usage.get("input_tokens")) - cache_read - cache_write)
+                    output_tokens = number(usage.get("output_tokens"))
+                    if not (input_tokens or output_tokens or cache_read or cache_write):
+                        continue
+                    day = local_day(entry.get("timestamp") or path.stat().st_mtime)
+                    add_usage(day, str(path), current_model, input_tokens, output_tokens, cache_read, cache_write)
+        except Exception:
+            continue
+
+
+def ensure_antigravity_storage():
+    """Ensure independent storage exists and auto-migrate legacy data."""
+    ANTIGRAVITY_DIR.mkdir(parents=True, exist_ok=True)
+    ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
+    if not ACCOUNTS_INDEX.is_file():
+        legacy_index = LEGACY_DIR / "accounts.json"
+        legacy_accounts = LEGACY_DIR / "accounts"
+        if legacy_index.is_file():
+            try:
+                shutil.copy2(legacy_index, ACCOUNTS_INDEX)
+                if legacy_accounts.is_dir():
+                    for f in legacy_accounts.glob("*.json"):
+                        shutil.copy2(f, ACCOUNTS_DIR / f.name)
+            except Exception:
+                pass
+
+
+def load_antigravity_accounts(force=False, limits_only=False):
+    """Load all accounts and quotas from ~/.config/omarchy/agents/antigravity."""
+    ensure_antigravity_storage()
+    accounts_info = []
+    current_account_id = ""
+    current_tier = ""
+    limits = []
+
+    if not ACCOUNTS_INDEX.is_file():
+        return {
+            "ready": False,
+            "currentAccountId": "",
+            "currentAccountEmail": "",
+            "tierLabel": "",
+            "accounts": [],
+            "limits": [],
+            "usageStatusText": "No accounts configured",
+            "authHelpText": AUTH_HELP
+        }
+
+    try:
+        index_data = json.loads(ACCOUNTS_INDEX.read_text(encoding="utf-8"))
+        current_account_id = str(index_data.get("current_account_id") or "")
+        account_stubs = index_data.get("accounts", [])
+    except Exception as exc:
+        return {
+            "ready": False,
+            "currentAccountId": "",
+            "currentAccountEmail": "",
+            "tierLabel": "",
+            "accounts": [],
+            "limits": [],
+            "usageStatusText": f"Error reading accounts: {exc}",
+            "authHelpText": AUTH_HELP
+        }
+
+    # Check if we should trigger an online refresh
+    now_ts = int(time.time())
+    ctl_bin = Path(__file__).resolve().parent / "omarchy-antigravity-ctl"
+
+    if ctl_bin.is_file():
+        needs_refresh = force
+        if not needs_refresh:
+            # Check current account last updated time
+            curr_file = ACCOUNTS_DIR / f"{current_account_id}.json"
+            if curr_file.is_file():
+                try:
+                    c_data = json.loads(curr_file.read_text(encoding="utf-8"))
+                    c_quota = c_data.get("quota") or {}
+                    last_up = int(c_quota.get("last_updated") or 0)
+                    if (now_ts - last_up) > 60:
+                        needs_refresh = True
+                except Exception:
+                    needs_refresh = True
+        if needs_refresh:
+            try:
+                subprocess.run([str(ctl_bin), "refresh"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=12)
+            except Exception:
+                pass
+
+    for stub in account_stubs:
+        acc_id = str(stub.get("id") or "")
+        if not acc_id:
+            continue
+        acc_file = ACCOUNTS_DIR / f"{acc_id}.json"
+        acc_data = {}
+        if acc_file.is_file():
+            try:
+                acc_data = json.loads(acc_file.read_text(encoding="utf-8"))
+            except Exception:
+                acc_data = {}
+
+        email = str(acc_data.get("email") or stub.get("email") or "")
+        name = str(acc_data.get("name") or stub.get("name") or email)
+        disabled = bool(stub.get("disabled") or acc_data.get("disabled"))
+        is_current = (acc_id == current_account_id)
+
+        quota = acc_data.get("quota") or {}
+        models = quota.get("models") or []
+        tier = str(quota.get("subscription_tier") or "")
+
+        flash_pct = None
+        flash_reset = ""
+        has_flash = False
+        opus_pct = None
+        opus_reset = ""
+        has_opus = False
+
+        for m in models:
+            m_name = str(m.get("name") or "").lower()
+            pct = int(m.get("percentage") if m.get("percentage") is not None else 100)
+            reset_time = str(m.get("reset_time") or "")
+
+            if "gemini-3.7-flash" in m_name or "gemini-3-flash" in m_name or "gemini-2.5-flash" in m_name:
+                has_flash = True
+                if flash_pct is None or pct < flash_pct or not flash_reset:
+                    flash_pct = pct
+                    flash_reset = reset_time
+            elif "opus" in m_name or "claude" in m_name or "sonnet" in m_name:
+                has_opus = True
+                if opus_pct is None or pct < opus_pct or not opus_reset:
+                    opus_pct = pct
+                    opus_reset = reset_time
+
+        quota_groups = quota.get("quota_groups") or []
+        gemini_weekly_pct = None
+        gemini_weekly_reset = ""
+        gemini_5h_pct = None
+        gemini_5h_reset = ""
+        claude_weekly_pct = None
+        claude_weekly_reset = ""
+        claude_5h_pct = None
+        claude_5h_reset = ""
+
+        for group in quota_groups:
+            group_name = str(group.get("display_name") or "").lower()
+            buckets = group.get("buckets") or []
+            for b in buckets:
+                window = str(b.get("window") or "").lower()
+                bucket_id = str(b.get("bucket_id") or "").lower()
+                rem_frac = float(b.get("remaining_fraction") if b.get("remaining_fraction") is not None else 1.0)
+                reset_t = str(b.get("reset_time") or "")
+
+                if "gemini" in group_name or "gemini" in bucket_id:
+                    if "week" in window or "week" in bucket_id:
+                        gemini_weekly_pct = rem_frac
+                        gemini_weekly_reset = reset_t
+                    elif "5h" in window or "5h" in bucket_id:
+                        gemini_5h_pct = rem_frac
+                        gemini_5h_reset = reset_t
+                elif "claude" in group_name or "gpt" in group_name or "3p" in bucket_id:
+                    if "week" in window or "week" in bucket_id:
+                        claude_weekly_pct = rem_frac
+                        claude_weekly_reset = reset_t
+                    elif "5h" in window or "5h" in bucket_id:
+                        claude_5h_pct = rem_frac
+                        claude_5h_reset = reset_t
+
+        # Resolve 5h fractions & percentages
+        final_flash_frac = gemini_5h_pct if gemini_5h_pct is not None else ((flash_pct / 100.0) if flash_pct is not None else 1.0)
+        final_flash_pct = round(final_flash_frac * 100)
+        final_flash_reset = gemini_5h_reset or flash_reset
+
+        final_opus_frac = claude_5h_pct if claude_5h_pct is not None else ((opus_pct / 100.0) if opus_pct is not None else 1.0)
+        final_opus_pct = round(final_opus_frac * 100)
+        final_opus_reset = claude_5h_reset or opus_reset
+
+        accounts_info.append({
+            "id": acc_id,
+            "email": email,
+            "name": name,
+            "isCurrent": is_current,
+            "flashQuota": final_flash_pct,
+            "flashResetAt": final_flash_reset,
+            "geminiWeeklyPercent": gemini_weekly_pct,
+            "geminiWeeklyResetAt": gemini_weekly_reset,
+            "claudeWeeklyPercent": claude_weekly_pct,
+            "claudeWeeklyResetAt": claude_weekly_reset,
+            "tier": tier,
+            "disabled": disabled,
+            "lastUsed": int(stub.get("last_used") or 0)
+        })
+
+        if is_current:
+            current_tier = tier or "Google AI Pro"
+            limits.append({
+                "title": "Gemini 3.7 Flash",
+                "percent": final_flash_frac,
+                "remaining": final_flash_frac,
+                "resetsAt": final_flash_reset,
+                "weeklyPercent": gemini_weekly_pct if gemini_weekly_pct is not None else 1.0,
+                "weeklyResetAt": gemini_weekly_reset
+            })
+            limits.append({
+                "title": "Claude Opus 4.6",
+                "percent": final_opus_frac,
+                "remaining": final_opus_frac,
+                "resetsAt": final_opus_reset,
+                "weeklyPercent": claude_weekly_pct if claude_weekly_pct is not None else 1.0,
+                "weeklyResetAt": claude_weekly_reset
+            })
+
+    current_account_email = next((a["email"] for a in accounts_info if a["isCurrent"]), "")
+
+    return {
+        "ready": len(accounts_info) > 0,
+        "currentAccountId": current_account_id,
+        "currentAccountEmail": current_account_email,
+        "tierLabel": current_tier or "Google AI Pro",
+        "accounts": accounts_info,
+        "limits": limits,
+        "usageStatusText": "",
+        "authHelpText": AUTH_HELP
+    }
+
+
+SCAN_REUSE_SECONDS = 30
+LIMITS_ONLY_REUSE_SECONDS = 900
+
+
+def local_stats():
+    """Snapshot the aggregated local usage into the record's stats dict."""
+    today_total_cost = 0.0
+    for m, b in today_model_usage.items():
+        inp = int(b.get("inputTokens") or 0)
+        out = int(b.get("outputTokens") or 0)
+        cr = int(b.get("cacheReadInputTokens") or 0)
+        cw = int(b.get("cacheCreationInputTokens") or 0)
+        today_total_cost += calculate_cost(m, inp, out, cr, cw)
+
+    return {
+        "todayPrompts": today_prompts,
+        "todaySessions": len(today_sessions),
+        "todayTotalTokens": today_total_tokens,
+        "todayTotalCost": round(today_total_cost, 4),
+        "todayTokensByModel": today_tokens_by_model,
+        "todayModelUsage": today_model_usage,
+        "recentDays": [recent[day] for day in recent_dates],
+        "totalPrompts": total_prompts,
+        "totalSessions": len(total_sessions),
+        "activeDays": len(active_days),
+        "activeDates": sorted(active_days),
+        "modelUsage": model_usage,
+    }
+
+
+def scan_cache_paths():
+    base = Path(os.environ.get("XDG_CACHE_HOME") or (HOME / ".cache")) / "omarchy" / "agents" / "usage"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "antigravity-scan.json", base / ".antigravity-scan.lock"
+
+
+def read_fresh_json(path, max_age_seconds):
+    try:
+        st = path.stat()
+        if max_age_seconds is not None and (time.time() - st.st_mtime) > max_age_seconds:
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def read_cached_stats(cache_file, max_age_seconds):
+    cached = read_fresh_json(cache_file, max_age_seconds)
+    if not isinstance(cached, dict) or cached.get("schemaVersion") != 1:
+        return None
+    if cached.get("scanDate") != today:
+        return None
+    stats = cached.get("stats")
+    if not isinstance(stats, dict):
+        return None
+    if not all(k in stats for k in ("todayPrompts", "todayTotalTokens", "recentDays", "activeDates", "modelUsage", "todayModelUsage")):
+        return None
+    return stats
+
+
+def write_cached_stats(cache_file, stats):
+    try:
+        handle_fd, tmp_name = tempfile.mkstemp(dir=cache_file.parent, prefix=cache_file.name + ".", suffix=".tmp")
+        tmp = Path(tmp_name)
+        with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"schemaVersion": 1, "scanDate": today, "stats": stats}, separators=(",", ":")) + "\n")
+        tmp.chmod(0o644)
+        tmp.replace(cache_file)
+    except Exception as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def run_local_scans():
+    global today_prompts, today_total_tokens, total_prompts
+    today_prompts = 0
+    today_total_tokens = 0
+    total_prompts = 0
+    today_sessions.clear()
+    total_sessions.clear()
+    active_days.clear()
+    today_tokens_by_model.clear()
+    today_model_usage.clear()
+    model_usage.clear()
+    seen_pi_messages.clear()
+    for d in recent_dates:
+        recent[d] = {"date": d, "messageCount": 0, "totalCost": 0.0, "models": {}}
+
+    scan_pi_sessions()
+    scan_native_codex_sessions()
+    scan_opencode_sessions()
+    scan_agy_sessions()
+    return local_stats()
+
+
+def cached_local_stats(max_age):
+    try:
+        cache_file, lock_file = scan_cache_paths()
+        cached = read_cached_stats(cache_file, max_age)
+        if cached is not None:
+            return cached
+
+        with lock_file.open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            cached = read_cached_stats(cache_file, max_age)
+            if cached is not None:
+                return cached
+            stats = run_local_scans()
+            write_cached_stats(cache_file, stats)
+            return stats
+    except Exception:
+        return run_local_scans()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--limits-only", action="store_true")
+    args = parser.parse_args()
+
+    max_age = 0 if args.force else (LIMITS_ONLY_REUSE_SECONDS if args.limits_only else SCAN_REUSE_SECONDS)
+    stats = cached_local_stats(max_age)
+
+    accounts_state = load_antigravity_accounts(force=args.force, limits_only=args.limits_only)
+
+    record = {
+        "schemaVersion": 1,
+        "id": AGENT_ID,
+        "name": AGENT_NAME,
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+        "ready": accounts_state.get("ready", True),
+        "hasLocalStats": True,
+        "hasPromptStats": True,
+        "tierLabel": accounts_state.get("tierLabel", "Google AI Pro"),
+        "currentAccountId": accounts_state.get("currentAccountId", ""),
+        "currentAccountEmail": accounts_state.get("currentAccountEmail", ""),
+        "accounts": accounts_state.get("accounts", []),
+        "limits": accounts_state.get("limits", []),
+        "usageStatusText": accounts_state.get("usageStatusText", ""),
+        "authHelpText": accounts_state.get("authHelpText", AUTH_HELP),
+    }
+    record.update(stats)
+
+    print(json.dumps(record, separators=(",", ":")))
+
+
+if __name__ == "__main__":
+    main()
+

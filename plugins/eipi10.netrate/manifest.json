@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "eipi10.netrate",
+  "name": "Network rate",
+  "version": "1.0.0",
+  "author": "eipi10",
+  "description": "Live upload and download rates on the bar, sampled from /sys/class/net.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "NetRate.qml"
+  },
+  "barWidget": {
+    "displayName": "Network rate",
+    "description": "Live upload and download rates on the bar",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

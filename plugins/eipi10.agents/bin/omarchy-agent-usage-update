@@ -1,0 +1,64 @@
+#!/bin/bash
+
+set -o pipefail
+
+readonly STOCK_UPDATE=/usr/share/omarchy/bin/omarchy-agent-usage-update
+readonly CODEX_COLLECTOR="$HOME/.config/omarchy/plugins/eipi10.agents/bin/omarchy-agent-usage-codex"
+readonly AGY_COLLECTOR="$HOME/.config/omarchy/plugins/eipi10.agents/bin/omarchy-agent-usage-antigravity"
+readonly USAGE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage"
+
+flags=()
+only=()
+skip_codex=false
+skip_antigravity=false
+args=("$@")
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --force | --limits-only)
+    flags+=("$1")
+    ;;
+  --except)
+    [[ $2 == codex ]] && skip_codex=true
+    [[ $2 == antigravity ]] && skip_antigravity=true
+    shift
+    ;;
+  *)
+    only+=("$1")
+    ;;
+  esac
+  shift
+done
+
+"$STOCK_UPDATE" "${args[@]}" --except codex --except antigravity
+status=$?
+
+mkdir -p "$USAGE_DIR"
+
+if ! $skip_codex && { (( ${#only[@]} == 0 )) || [[ " ${only[*]} " == *" codex "* ]]; }; then
+  if [[ -x "$CODEX_COLLECTOR" ]]; then
+    if record=$("$CODEX_COLLECTOR" "${flags[@]}") && [[ -n $record ]] && jq -e . >/dev/null 2>&1 <<<"$record"; then
+      tmp=$(mktemp "$USAGE_DIR/.codex.XXXXXX")
+      printf '%s\n' "$record" >"$tmp"
+      mv "$tmp" "$USAGE_DIR/codex.json"
+    else
+      echo "omarchy-agent-usage-update: codex collector failed" >&2
+      status=1
+    fi
+  fi
+fi
+
+if ! $skip_antigravity && { (( ${#only[@]} == 0 )) || [[ " ${only[*]} " == *" antigravity "* ]]; }; then
+  if [[ -x "$AGY_COLLECTOR" ]]; then
+    if record=$("$AGY_COLLECTOR" "${flags[@]}") && [[ -n $record ]] && jq -e . >/dev/null 2>&1 <<<"$record"; then
+      tmp=$(mktemp "$USAGE_DIR/.antigravity.XXXXXX")
+      printf '%s\n' "$record" >"$tmp"
+      mv "$tmp" "$USAGE_DIR/antigravity.json"
+    else
+      echo "omarchy-agent-usage-update: antigravity collector failed" >&2
+      status=1
+    fi
+  fi
+fi
+
+exit "$status"

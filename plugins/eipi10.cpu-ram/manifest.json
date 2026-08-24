@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "eipi10.cpu-ram",
+  "name": "CPU & RAM",
+  "version": "1.0.0",
+  "author": "eipi10",
+  "description": "Live CPU and memory usage on the bar with a per-core, cache/swap, and top-process breakdown popup.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "SysMon.qml"
+  },
+  "barWidget": {
+    "displayName": "CPU & RAM",
+    "description": "Live CPU and memory usage with a per-core, cache/swap, and top-process breakdown popup",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showCpu": true,
+      "showRam": true,
+      "showTemp": true,
+      "cpuAlert": 85,
+      "memAlert": 90,
+      "tempAlert": 85
+    },
+    "schema": [
+      { "key": "showCpu", "type": "bool", "label": "Show CPU" },
+      { "key": "showRam", "type": "bool", "label": "Show RAM" },
+      { "key": "showTemp", "type": "bool", "label": "Show CPU temperature" },
+      { "key": "cpuAlert", "type": "int", "label": "CPU alert percent" },
+      { "key": "memAlert", "type": "int", "label": "Memory alert percent" },
+      { "key": "tempAlert", "type": "int", "label": "Temperature alert \u00b0C" }
+    ]
+  }
+}

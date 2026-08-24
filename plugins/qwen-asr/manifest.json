@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "qwen-asr",
+  "name": "Qwen ASR",
+  "version": "1.1.0",
+  "author": "XiezhaoPan",
+  "description": "Push-to-talk Qwen Audio 3.0 ASR in the bar: hold to record with a live level meter, release to transcribe into the clipboard.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "QwenAsrWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Qwen ASR",
+    "description": "Hold to record with a live level meter, release to transcribe to clipboard. F9 works as push-to-talk anywhere.",
+    "category": "Utility",
+    "allowMultiple": false,
+    "defaultSection": "center"
+  }
+}

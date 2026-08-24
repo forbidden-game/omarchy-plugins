@@ -7,7 +7,7 @@
 - **主仓库路径**：`~/work/projects/omarchy-plugins` (`/home/eipi10/work/projects/omarchy-plugins`)
 - **远程开源地址**：[`forbidden-game/omarchy-plugins`](https://github.com/forbidden-game/omarchy-plugins)
 - **运行环境路径**：`~/.config/omarchy/plugins` (`/home/eipi10/.config/omarchy/plugins`)
-- **运行宿主**：单实例长驻进程 `omarchy-shell`（位于 `/usr/share/omarchy/shell/`），所有挂件、面板、覆盖层均作为插件运行。
+- **运行宿主**：单实例长驻进程 `omarchy-shell`（位于 `/usr/share/omarchy/shell/`），底层基于 **Quickshell** 响应式引擎运行，所有挂件、面板、覆盖层均作为插件运行。
 - **单点真实源原则 (Single Source of Truth)**：
   - **所有插件的源码、Manifest、文档、静态资源均在本项目 `plugins/<plugin-id>/` 下集中维护**。
   - 运行环境 `~/.config/omarchy/plugins/<plugin-id>` **一律通过符号链接（Symlink）** 指向本仓库对应子目录。
@@ -51,24 +51,34 @@ omarchy-plugins/
 
 ---
 
-## 4. 日常开发、维护与提交工作流 (Development Workflow)
+## 4. 日常开发、调试、热重载与重启 (Workflow & Lifecycle)
 
 ### 4.1 修改与调试现有插件
 1. **修改代码**：直接在 `plugins/<plugin-id>/` 目录下编辑 QML / JS / Shell 脚本。
-2. **实时生效**：由于 `~/.config/omarchy/plugins/` 均为软链接，保存后 `omarchy-shell` 会自动监听重载。
-3. **强制刷新与重载**：
+2. **实时生效**：由于 `~/.config/omarchy/plugins/` 均为软链接，保存后 `omarchy-shell` 会自动监听文件变更并热重载。
+3. **轻量重扫与配置重载**：
    ```bash
-   # 重新扫描所有插件
+   # 重新扫描所有插件目录
    omarchy-shell shell rescanPlugins
 
    # 重新加载 shell 配置 (~/.config/omarchy/shell.json)
    omarchy-shell shell reloadConfig
    ```
-4. **规范校验**：
+4. **【重要】完整重启 Quickshell / Omarchy Shell (`omarchy restart shell`)**：
+   在日常开发中，遇到以下场景时**必须执行完整 Shell 重启**，仅靠热重载无法彻底清除深层状态：
+   ```bash
+   omarchy restart shell
+   ```
+   **何时必须重启 Shell：**
+   - **全局单例与状态残留**：修改了 `pragma Singleton`、全局 JavaScript 数据缓存或未解绑的信号连接；
+   - **进程级死锁或崩溃**：后台子进程卡死、高频定时器导致 Quickshell 事件循环阻塞、界面挂起时；
+   - **组件生命周期重置**：修改了涉及窗口层级（LayerSurface）、全局弹出菜单（Panel）定位或复杂状态树的底层结构；
+   - **C++ 原生扩展与环境刷新**：外部动态库更新或环境变量变更。
+5. **规范校验**：
    ```bash
    omarchy plugin validate plugins/<plugin-id>
    ```
-5. **提交与推送**：
+6. **提交与推送**：
    ```bash
    git add plugins/<plugin-id>/
    git commit -m "feat(<plugin-id>): add your feature description"
@@ -122,6 +132,7 @@ Agent 在完成任何插件修改后，需遵循以下交付流程：
 
 - [ ] **1. Manifest 校验**：运行 `omarchy plugin validate plugins/<plugin-id>` 确保返回码为 0。
 - [ ] **2. 运行时无报错**：检查 Shell 日志或运行输出，确认无 QML 语法错误、TypeError 或未捕获异常。
-- [ ] **3. 状态覆盖自测**：检查初始加载态、空状态、异常状态、极端文本溢出等表现。
-- [ ] **4. 检查 Git Diff**：在仓库根目录执行 `git diff` 与 `git status`，确认变更精准无误且无敏感凭据。
-- [ ] **5. 提交并推送**：遵循 Conventional Commits 提交并 `git push` 到 GitHub。
+- [ ] **3. 必要时重启 Shell**：涉及单例或复杂状态修改时执行 `omarchy restart shell` 确保干净加载。
+- [ ] **4. 状态覆盖自测**：检查初始加载态、空状态、异常状态、极端文本溢出等表现。
+- [ ] **5. 检查 Git Diff**：在仓库根目录执行 `git diff` 与 `git status`，确认变更精准无误且无敏感凭据。
+- [ ] **6. 提交并推送**：遵循 Conventional Commits 提交并 `git push` 到 GitHub。

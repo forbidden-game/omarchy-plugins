@@ -41,11 +41,15 @@ Or install a specific plugin:
 ./install.sh eipi10.agents
 ```
 
-### 3. Reload Shell
+### 3. Reload or Restart Shell
 
 ```bash
+# Lightweight rescan and config reload
 omarchy-shell shell rescanPlugins
 omarchy-shell shell reloadConfig
+
+# Full restart (recommended when updating complex widgets, singletons, or dependencies)
+omarchy restart shell
 ```
 
 ---

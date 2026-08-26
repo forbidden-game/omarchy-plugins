@@ -108,7 +108,7 @@ Column {
 
   PanelSectionHeader {
     width: parent.width
-    text: "TOKENS BY DAY"
+    text: "TOKENS BY DAY · ALL AGENTS"
     foreground: root.foreground
     fontFamily: root.fontFamily
   }

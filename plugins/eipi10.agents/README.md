@@ -18,12 +18,16 @@ cross-device aggregation); `Agent.qml` is the per-record file watcher.
 - **Balance** — prepaid agents report a credit ledger instead of limits:
   remaining credit, a fuel-gauge meter that drains toward empty, and
   funded-versus-spent detail.
-- **Tokens by day** — one row per day for the last week: day, bar, tokens, with today
-  bolded at the bottom. Hover today for its prompt and session count.
-- **Tokens by model** — tokens per model with the bar behind each row scaled
-  to the heaviest model,
-  the same way the weekly chart scales to its busiest day. Hover for the
-  input / output / cache split.
+- **All agents banner** — the top line sums every enabled agent: today's
+  spend rated at API list prices, plus the token and prompt counts behind it.
+- **Tokens by day** — one row per day for the last week across all agents:
+  day, bar, tokens, with today bolded at the bottom. Hover today for its
+  prompt and session count.
+- **Spend by agent** — one group per subscription with a rated subtotal, then
+  that agent's models indented under it, each scaled to the group's heaviest
+  model. Hover a model row for the input / output / cache split and the rates
+  applied. Rates live in `js/Pricing.js` with their official sources and the
+  date they were checked.
 
 A subscription appears only when it is enabled in settings and has actually
 recorded usage — on this machine or on a synced one. With one such agent

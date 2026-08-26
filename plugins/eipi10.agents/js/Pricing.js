@@ -40,13 +40,22 @@ var DEFAULT_RATES = {
   "claude-3-5-haiku": { input: 0.80, output: 4.00, cacheRead: 0.08, cacheWrite: 1.00 },
   "claude-3-opus": { input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75 },
 
-  // Qwen (Local llama.cpp / Self-hosted tunnels on office_server -> $0.00)
-  "qwen38": { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 },
-  "qwen38-q3kxl": { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 },
-  "qwen38-iq3xxs": { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 },
-  "qwen38-ridge": { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 },
-  "qwen38-udq8-mtp-vlm": { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 },
-  "qwen-2.5-coder": { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 },
+  // GLM (Zhipu/Z.ai official pricing — https://docs.z.ai/guides/overview/pricing,
+  // checked 2026-08-27. GLM-5.3-Flash is on a 50% promo through 2026-09-09:
+  // list $0.15/$0.03/$0.50 -> current $0.075/$0.015/$0.25; no cache-write surcharge)
+  "glm-5.3-flash": { input: 0.075, output: 0.25, cacheRead: 0.015, cacheWrite: 0.075 },
+  "glm-5.3": { input: 1.40, output: 4.40, cacheRead: 0.26, cacheWrite: 1.40 },
+
+  // Qwen (Alibaba DashScope/Bailian official list price for Qwen3.8-27B:
+  // CNY 3 input / 12 output / 0.6 cache-hit / 3.75 cache-write per M tokens,
+  // converted at 7.2 CNY/USD — checked 2026-08-27. Self-hosted quants on
+  // office_server are rated at the same base-model API list price.)
+  "qwen38": { input: 0.42, output: 1.67, cacheRead: 0.083, cacheWrite: 0.52 },
+  "qwen38-q3kxl": { input: 0.42, output: 1.67, cacheRead: 0.083, cacheWrite: 0.52 },
+  "qwen38-iq3xxs": { input: 0.42, output: 1.67, cacheRead: 0.083, cacheWrite: 0.52 },
+  "qwen38-ridge": { input: 0.42, output: 1.67, cacheRead: 0.083, cacheWrite: 0.52 },
+  "qwen38-udq8-mtp-vlm": { input: 0.42, output: 1.67, cacheRead: 0.083, cacheWrite: 0.52 },
+  "qwen-2.5-coder": { input: 0.42, output: 1.67, cacheRead: 0.083, cacheWrite: 0.52 },
 
   // Free / Local
   "ox-alpha-free": { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 },
@@ -59,6 +68,8 @@ function getModelRate(modelId, customRates) {
   if (DEFAULT_RATES[id]) return DEFAULT_RATES[id]
 
   if (id.indexOf("free") >= 0) return { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 }
+  if (id.indexOf("glm") >= 0 && id.indexOf("flash") >= 0) return DEFAULT_RATES["glm-5.3-flash"]
+  if (id.indexOf("glm") >= 0) return DEFAULT_RATES["glm-5.3"]
   if (id.indexOf("qwen") >= 0) return DEFAULT_RATES["qwen38"]
   if (id.indexOf("sol") >= 0) return DEFAULT_RATES["gpt-5.6-sol"]
   if (id.indexOf("terra") >= 0) return DEFAULT_RATES["gpt-5.6-terra"]

@@ -389,6 +389,25 @@ Item {
     for (var dateKey in dateSet) activeDates.push(dateKey)
     activeDates.sort()
 
+    // Per-agent snapshots so the panel can also break the totals down by
+    // subscription instead of only showing one merged model list.
+    var agents = []
+    for (var j = 0; j < pList.length; j++) {
+      var pa = pList[j]
+      if (pa.hasLocalStats === false && numberValue(pa.todayTotalTokens) === 0) continue
+      agents.push({
+        providerId: pa.providerId,
+        providerName: pa.providerName,
+        todayModelUsage: pa.todayModelUsage || {},
+        modelUsage: pa.modelUsage || {},
+        todayTotalTokens: numberValue(pa.todayTotalTokens),
+        todayTotalCost: numberValue(pa.todayTotalCost),
+        todayPrompts: numberValue(pa.todayPrompts),
+        todaySessions: numberValue(pa.todaySessions)
+      })
+    }
+    agents.sort(function(a, b) { return b.todayTotalTokens - a.todayTotalTokens })
+
     return {
       providerId: "aggregate",
       providerName: "All Agents",
@@ -413,6 +432,7 @@ Item {
       activeDays: activeDates.length,
       activeDates: activeDates,
       modelUsage: modelMap,
+      agents: agents,
       hasLocalStats: hasStats,
       hasPromptStats: true,
       syncEnabled: false,

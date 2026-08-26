@@ -22,23 +22,13 @@ Column {
       + Number(b.cacheReadInputTokens || b.cacheRead || 0) + Number(b.cacheCreationInputTokens || b.cacheWrite || 0)
   }
 
-  readonly property var tableData: {
-    var p = root.provider
-    var today = p ? (p.todayModelUsage || {}) : {}
-    var anyToday = false
-    for (var id in today) {
-      if (bucketTotal(today[id]) > 0) { anyToday = true; break }
-    }
-    var source = anyToday ? today : (p ? (p.modelUsage || {}) : {})
-    var rows = []
-    var totalCostSum = 0
-    var totalTokensSum = 0
-
+  // Turn one provider's model-usage map into display rows, merged by
+  // normalized model id, rated at API list prices, heaviest first.
+  function buildRows(source, colorOffset) {
     var normalizedBuckets = {}
     for (var rawId in source) {
       var bucket = source[rawId] || {}
-      var tot = bucketTotal(bucket)
-      if (tot <= 0) continue
+      if (bucketTotal(bucket) <= 0) continue
       var normId = Format.normalizeModelId(rawId)
       if (!normalizedBuckets[normId]) {
         normalizedBuckets[normId] = {
@@ -54,13 +44,13 @@ Column {
       normalizedBuckets[normId].cacheCreationInputTokens += Number(bucket.cacheCreationInputTokens || bucket.cacheWrite || 0)
     }
 
+    var totalTokensSum = 0
     var rawRows = []
     for (var modelId in normalizedBuckets) {
       var nBucket = normalizedBuckets[modelId]
       var nTot = bucketTotal(nBucket)
       if (nTot <= 0) continue
       var costBreakdown = Pricing.calculateModelCost(modelId, nBucket, root.customRates)
-      totalCostSum += costBreakdown.total
       totalTokensSum += nTot
       rawRows.push({
         id: modelId,
@@ -77,19 +67,56 @@ Column {
 
     rawRows.sort(function(a, b) { return b.total - a.total })
 
+    var rows = []
     for (var i = 0; i < rawRows.length; i++) {
       var r = rawRows[i]
-      r.color = ModelIcons.getModelColor(r.id, Color, i)
+      r.color = ModelIcons.getModelColor(r.id, Color, colorOffset + i)
       r.sharePct = totalTokensSum > 0 ? ((r.total / totalTokensSum) * 100).toFixed(1) + "%" : "0%"
       rows.push(r)
     }
+    return rows
+  }
 
-    return {
-      rows: rows,
-      scope: anyToday ? "Today" : "All-time",
-      totalCost: totalCostSum,
-      totalTokens: totalTokensSum
+  // One group per enabled agent — today's numbers when the agent has any,
+  // all-time otherwise — each with a rated subtotal, heaviest agent first.
+  readonly property var tableData: {
+    var p = root.provider
+    if (!p) return { groups: [], scope: "TODAY" }
+    var agents = (Array.isArray(p.agents) && p.agents.length > 0)
+      ? p.agents
+      : [{ providerId: p.providerId, providerName: p.providerName, todayModelUsage: p.todayModelUsage || {}, modelUsage: p.modelUsage || {} }]
+
+    var groups = []
+    var colorIndex = 0
+    var anyToday = false
+    for (var i = 0; i < agents.length; i++) {
+      var agent = agents[i]
+      var today = agent.todayModelUsage || {}
+      var hasToday = false
+      for (var id in today) {
+        if (bucketTotal(today[id]) > 0) { hasToday = true; break }
+      }
+      if (hasToday) anyToday = true
+      var rows = buildRows(hasToday ? today : (agent.modelUsage || {}), colorIndex)
+      colorIndex += rows.length
+      if (rows.length === 0) continue
+      var subtotalTokens = 0
+      var subtotalCost = 0
+      for (var r2 = 0; r2 < rows.length; r2++) {
+        subtotalTokens += rows[r2].total
+        subtotalCost += rows[r2].cost
+      }
+      groups.push({
+        providerId: agent.providerId,
+        name: agent.providerName,
+        rows: rows,
+        subtotalTokens: subtotalTokens,
+        subtotalCost: subtotalCost
+      })
     }
+
+    groups.sort(function(a, b) { return b.subtotalTokens - a.subtotalTokens })
+    return { groups: groups, scope: anyToday ? "TODAY" : "ALL-TIME" }
   }
 
   function modelTooltip(row) {
@@ -111,141 +138,189 @@ Column {
     return text
   }
 
-  visible: root.tableData.rows.length > 0
+  visible: root.tableData.groups.length > 0
   width: parent ? parent.width : 0
   spacing: Style.space(6)
 
   PanelSectionHeader {
     width: parent.width
-    text: "TOKENS & COST BY MODEL"
+    text: "SPEND BY AGENT · " + root.tableData.scope
     foreground: root.foreground
     fontFamily: root.fontFamily
   }
 
   Repeater {
-    model: root.tableData.rows
+    model: root.tableData.groups
 
-    Item {
-      id: modelRow
+    delegate: Column {
+      id: groupBlock
       required property var modelData
-      required property int index
-
-      readonly property real share: root.tableData.rows.length > 0
-        ? modelData.total / Math.max(1, root.tableData.rows[0].total) : 0
-
       width: root.width
-      implicitHeight: Style.space(24)
+      spacing: Style.space(2)
 
-      // Base background
-      Rectangle {
-        anchors.fill: parent
-        radius: Style.cornerRadius
-        color: root.alpha(root.foreground, 0.04)
-      }
-
-      // Proportional highlight fill
-      Rectangle {
-        anchors.left: parent.left
-        anchors.top: parent.top
-        anchors.bottom: parent.bottom
-        width: parent.width * root.clamp(modelRow.share, 0, 1)
-        radius: Style.cornerRadius
-        color: root.alpha(modelRow.modelData.color, 0.12)
-
-        Behavior on width {
-          NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
-        }
-      }
-
+      // Agent subtotal: the bold line that answers "how much did this one cost"
       Item {
-        id: modelContent
-        anchors.fill: parent
-        anchors.leftMargin: Style.space(6)
-        anchors.rightMargin: Style.space(6)
+        width: parent.width
+        implicitHeight: Style.space(24)
 
-        // Left Section: Rank + Color Bar + Name
+        Rectangle {
+          anchors.fill: parent
+          radius: Style.cornerRadius
+          color: root.alpha(root.foreground, 0.07)
+        }
+
         Row {
-          id: leftPart
+          id: subtotalLeft
           anchors.left: parent.left
-          anchors.right: rightPart.left
-          anchors.rightMargin: Style.spacing.sm
+          anchors.leftMargin: Style.space(6)
           anchors.verticalCenter: parent.verticalCenter
           spacing: Style.space(6)
 
-          Text {
-            id: rankText
-            text: (modelRow.index + 1) + "."
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
           Rectangle {
-            id: colorBar
             width: Style.space(4)
             height: Style.space(10)
             radius: Style.space(2)
-            color: modelRow.modelData.color
+            color: root.foreground
             anchors.verticalCenter: parent.verticalCenter
           }
 
           Text {
-            id: modelName
-            text: modelRow.modelData ? modelRow.modelData.name : ""
+            text: groupBlock.modelData.name
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
+            font.bold: true
             elide: Text.ElideRight
             anchors.verticalCenter: parent.verticalCenter
           }
         }
 
-        // Right Section: Share Pct + Tokens & Cost
-        Row {
-          id: rightPart
+        Text {
           anchors.right: parent.right
+          anchors.rightMargin: Style.space(6)
           anchors.verticalCenter: parent.verticalCenter
-          spacing: Style.space(8)
-
-          Text {
-            id: shareText
-            text: modelRow.modelData ? modelRow.modelData.sharePct : ""
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          Text {
-            id: modelTokens
-            text: {
-              if (!modelRow.modelData) return ""
-              var countStr = Format.formatTokenCount(modelRow.modelData.total)
-              var costStr = Pricing.formatMoney(modelRow.modelData.cost)
-              return countStr + " (" + costStr + ")"
-            }
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            font.bold: true
-            anchors.verticalCenter: parent.verticalCenter
-          }
+          text: Format.formatTokenCount(groupBlock.modelData.subtotalTokens) + " (" + Pricing.formatMoney(groupBlock.modelData.subtotalCost) + ")"
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
         }
       }
 
-      MouseArea {
-        id: modelHover
-        anchors.fill: parent
-        hoverEnabled: true
-        acceptedButtons: Qt.NoButton
+      Repeater {
+        model: groupBlock.modelData.rows
+
+        delegate: ModelRow {
+          rowData: modelData
+          groupMax: groupBlock.modelData.rows.length > 0 ? groupBlock.modelData.rows[0].total : 1
+        }
       }
 
-      PanelToolTip {
-        visible: modelHover.containsMouse
-        text: root.modelTooltip(modelRow.modelData)
-        fontFamily: root.fontFamily
+      Item { width: parent.width; implicitHeight: Style.space(6) }
+    }
+  }
+
+  component ModelRow: Item {
+    id: modelRow
+    property var rowData: null
+    property real groupMax: 1
+
+    readonly property real share: rowData ? root.clamp(rowData.total / Math.max(1, modelRow.groupMax), 0, 1) : 0
+
+    width: root.width
+    implicitHeight: Style.space(24)
+
+    Rectangle {
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(10)
+      radius: Style.cornerRadius
+      color: root.alpha(root.foreground, 0.04)
+    }
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(10)
+      anchors.top: parent.top
+      anchors.bottom: parent.bottom
+      width: (parent.width - Style.space(10)) * modelRow.share
+      radius: Style.cornerRadius
+      color: root.alpha(modelRow.rowData ? modelRow.rowData.color : root.foreground, 0.12)
+
+      Behavior on width {
+        NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
       }
+    }
+
+    Item {
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(16)
+      anchors.rightMargin: Style.space(16)
+
+      Row {
+        id: leftPart
+        anchors.left: parent.left
+        anchors.right: rightPart.left
+        anchors.rightMargin: Style.spacing.sm
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: Style.space(6)
+
+        Rectangle {
+          width: Style.space(4)
+          height: Style.space(10)
+          radius: Style.space(2)
+          color: modelRow.rowData ? modelRow.rowData.color : root.foreground
+          anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Text {
+          text: modelRow.rowData ? modelRow.rowData.name : ""
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideRight
+          anchors.verticalCenter: parent.verticalCenter
+        }
+      }
+
+      Row {
+        id: rightPart
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: Style.space(8)
+
+        Text {
+          text: modelRow.rowData ? modelRow.rowData.sharePct : ""
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          anchors.verticalCenter: parent.verticalCenter
+        }
+
+        Text {
+          text: {
+            if (!modelRow.rowData) return ""
+            return Format.formatTokenCount(modelRow.rowData.total) + " (" + Pricing.formatMoney(modelRow.rowData.cost) + ")"
+          }
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+          anchors.verticalCenter: parent.verticalCenter
+        }
+      }
+    }
+
+    MouseArea {
+      id: modelHover
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.NoButton
+    }
+
+    PanelToolTip {
+      visible: modelHover.containsMouse
+      text: root.modelTooltip(modelRow.rowData)
+      fontFamily: root.fontFamily
     }
   }
 }

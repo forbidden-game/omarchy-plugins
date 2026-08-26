@@ -433,6 +433,21 @@ Panel {
             }
           }
 
+          // ---------- Grand total across every enabled agent ----------
+          Comp.TotalBanner {
+            id: totalBanner
+            aggregate: usage.aggregateProvider
+            customRates: usage.customRates
+            foreground: root.foreground
+            dim: root.dim
+            fontFamily: root.fontFamily
+          }
+
+          PanelSeparator {
+            visible: totalBanner.visible
+            foreground: root.foreground
+          }
+
           // ---------- Hero: provider mark · name · plan · today cost ----------
           Comp.HeroSection {
             provider: root.provider

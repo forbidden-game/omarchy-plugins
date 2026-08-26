@@ -5,12 +5,14 @@ set -o pipefail
 readonly STOCK_UPDATE=/usr/share/omarchy/bin/omarchy-agent-usage-update
 readonly CODEX_COLLECTOR="$HOME/.config/omarchy/plugins/eipi10.agents/bin/omarchy-agent-usage-codex"
 readonly AGY_COLLECTOR="$HOME/.config/omarchy/plugins/eipi10.agents/bin/omarchy-agent-usage-antigravity"
+readonly GLM_COLLECTOR="$HOME/.config/omarchy/plugins/eipi10.agents/bin/omarchy-agent-usage-glm"
 readonly USAGE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage"
 
 flags=()
 only=()
 skip_codex=false
 skip_antigravity=false
+skip_glm=false
 args=("$@")
 
 while [[ $# -gt 0 ]]; do
@@ -21,6 +23,7 @@ while [[ $# -gt 0 ]]; do
   --except)
     [[ $2 == codex ]] && skip_codex=true
     [[ $2 == antigravity ]] && skip_antigravity=true
+    [[ $2 == glm ]] && skip_glm=true
     shift
     ;;
   *)
@@ -30,7 +33,7 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-"$STOCK_UPDATE" "${args[@]}" --except codex --except antigravity
+"$STOCK_UPDATE" "${args[@]}" --except codex --except antigravity --except glm
 status=$?
 
 mkdir -p "$USAGE_DIR"
@@ -56,6 +59,19 @@ if ! $skip_antigravity && { (( ${#only[@]} == 0 )) || [[ " ${only[*]} " == *" an
       mv "$tmp" "$USAGE_DIR/antigravity.json"
     else
       echo "omarchy-agent-usage-update: antigravity collector failed" >&2
+      status=1
+    fi
+  fi
+fi
+
+if ! $skip_glm && { (( ${#only[@]} == 0 )) || [[ " ${only[*]} " == *" glm "* ]]; }; then
+  if [[ -x "$GLM_COLLECTOR" ]]; then
+    if record=$("$GLM_COLLECTOR" "${flags[@]}") && [[ -n $record ]] && jq -e . >/dev/null 2>&1 <<<"$record"; then
+      tmp=$(mktemp "$USAGE_DIR/.glm.XXXXXX")
+      printf '%s\n' "$record" >"$tmp"
+      mv "$tmp" "$USAGE_DIR/glm.json"
+    else
+      echo "omarchy-agent-usage-update: glm collector failed" >&2
       status=1
     fi
   fi

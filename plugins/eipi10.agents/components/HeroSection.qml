@@ -7,7 +7,6 @@ import "../js/Format.js" as Format
 Item {
   id: root
   property var provider: null
-  property var globalProvider: null
   property var customRates: ({})
   property color foreground: Color.foreground
   property color dim: Qt.darker(foreground, 1.55)
@@ -24,7 +23,7 @@ Item {
     return tier
   }
 
-  readonly property var activeSource: root.globalProvider || root.provider
+  readonly property var activeSource: root.provider
   readonly property var todayUsage: activeSource ? (activeSource.todayModelUsage || {}) : {}
   readonly property real todayCost: {
     if (activeSource && activeSource.todayTotalCost > 0) return Number(activeSource.todayTotalCost)
@@ -80,6 +79,7 @@ Item {
 
     Text {
       id: costText
+      visible: root.todayCost > 0
       text: Pricing.formatMoney(root.todayCost)
       color: root.foreground
       font.family: root.fontFamily

@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically check Omarchy Antigravity proxy authentication
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

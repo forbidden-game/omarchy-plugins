@@ -4,7 +4,7 @@
 
 ## 1. 仓库定位与核心架构 (Scope & Architecture)
 
-- **主仓库路径**：`~/work/projects/omarchy-plugins` (`/home/eipi10/work/projects/omarchy-plugins`)
+- **主仓库路径**：`~/work/projects/omarchy_plugins/omarchy-plugins` (`/home/eipi10/work/projects/omarchy_plugins/omarchy-plugins`)，隶属于上层工作区 `~/work/projects/omarchy_plugins`
 - **远程开源地址**：[`forbidden-game/omarchy-plugins`](https://github.com/forbidden-game/omarchy-plugins)
 - **运行环境路径**：`~/.config/omarchy/plugins` (`/home/eipi10/.config/omarchy/plugins`)
 - **运行宿主**：单实例长驻进程 `omarchy-shell`（位于 `/usr/share/omarchy/shell/`），底层基于 **Quickshell** 响应式引擎运行，所有挂件、面板、覆盖层均作为插件运行。
@@ -25,7 +25,7 @@ omarchy-plugins/
 ├── README.md                # 插件合集总览、Plugin Matrix 与安装指南
 ├── install.sh               # 自动化安装与软链接管理脚本
 └── plugins/
-    ├── eipi10.agents/       # [AI] Claude, Codex, Antigravity, Fireworks 用量与配额监控
+    ├── eipi10.agents/       # [AI] Claude, Codex, Antigravity, Fireworks, GLM 用量与配额监控
     ├── eipi10.battery-info/ # [System] 电池实时充放电功率与日/周/月历史电量统计
     ├── eipi10.cpu-ram/      # [System] CPU/内存/Swap/温度与进程负载弹窗
     ├── eipi10.netrate/      # [Network] 极轻量上下行实时网速监控 (定长防抖)

@@ -56,6 +56,37 @@ light surfaces — and the bar glyph stands in when there is none.
 | `codex` | The Codex app-server RPC | native Codex CLI session files (plus pi and opencode sessions) |
 | `antigravity` | Google Cloud Code API (5-hour session + 7-day weekly per model group) & standalone multi-account switching with OAuth | native Codex CLI, pi/omp, opencode, and Antigravity (agy) session transcripts & SQLite token stats |
 | `fireworks` | Estimated prepaid balance: configured funding minus rated account costs | Fireworks billing API, grouped by day and model for the last 30 days |
+| `glm` | — (none yet; see below) | ZCode model I/O session logs, token-accounted per day and per model |
+
+### Antigravity streaming proxy
+
+The Antigravity tab can run a loopback-only OpenAI Responses proxy for `pi`
+and `omp`. The helper installs an enabled user-level systemd service,
+generates a random local API key, and adds the `antigravity-proxy` provider to
+both clients without changing their default models.
+
+Credentials have one source of truth:
+`~/.config/omarchy/agents/antigravity/auth/`. CLIProxyAPI is the only runtime
+writer for access-token refreshes. Account files under `accounts/` contain
+display and quota metadata only, so restarting the service cannot replace a
+new proxy token with an older copy. A five-minute systemd watchdog restarts
+the proxy once for a new authentication failure and notifies the desktop if
+the same failure persists.
+
+The configured models use the clients' `openai-responses` implementation, so
+reasoning summaries, interactive responses, and tool calls use typed streaming
+events over SSE:
+
+```bash
+pi --model antigravity-proxy/gemini-3.7-flash-high
+omp --model antigravity-proxy/gemini-3.7-flash-high
+```
+
+The panel starts and stops `omarchy-antigravity-proxy.service` and can copy
+either launch command. The service starts with the user session; stopping it
+from the panel keeps it stopped until the next manual start or login. Runtime
+configuration stays under `~/.config/omarchy/agents/antigravity/proxy/`; no
+secret is stored in this repository.
 
 Claude limits need a signed-in CLI; without credentials the panel says so and
 falls back to local stats only. A non-default Claude directory is honored via
@@ -64,6 +95,33 @@ falls back to local stats only. A non-default Claude directory is honored via
 `~/.fireworks/auth.ini` (which `firectl set-api-key` creates), then the key
 opencode stores in `~/.local/share/opencode/auth.json` when Fireworks is
 signed in there.
+
+### GLM Coding Plan
+
+The GLM tab counts what this machine's ZCode client actually sent: every
+model call logged under `~/.zcode/cli/rollout/` whose provider is a BigModel
+coding plan is token-accounted (`input + output + cache read/write`, matching
+the Codex collector's convention) and rolled up into today, the last week,
+and per-model totals. Plan entitlement comes from ZCode's own cache at
+`~/.zcode/v2/coding-plan-cache.json`; when it reports the plan unavailable
+the tab says so and keeps drawing local stats.
+
+Live quota comes from a plain BigModel API key. Put it in
+`~/.config/omarchy/agents/glm.json` (mode 600, never in this repository):
+
+```json
+{"apiKey": "your-key.id.secret"}
+```
+
+or export `GLM_API_KEY` / `BIGMODEL_API_KEY` / `ZHIPU_API_KEY`. The collector
+then asks `open.bigmodel.cn` for the subscription name
+(`/api/biz/subscription/list`) and the credit windows
+(`/api/monitor/usage/quota/limit` — the 5-hour session window and the weekly
+window), which render as the tab's limit meters. ZCode's own OAuth token is
+encrypted at rest (`enc:v1` in `~/.zcode/v2/credentials.json`) and is not
+used. Totals cover only the rollout logs still on disk — ZCode prunes old
+sessions, so "all-time" means "everything ZCode kept", mirroring the Codex
+window caveat.
 
 ### Fireworks balance
 

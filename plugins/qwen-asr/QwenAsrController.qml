@@ -1,5 +1,4 @@
 import QtQuick
-import QtMultimedia
 import Quickshell
 import Quickshell.Io
 import Quickshell.Services.Pipewire
@@ -34,6 +33,7 @@ Item {
   readonly property string settingsFile: settingsDir + "/qwen-asr-qt.conf"
   readonly property string historyDir: homeDir + "/.local/share/XiezhaoPan/qwen-asr-qt"
   readonly property string historyFile: historyDir + "/transcripts.txt"
+  readonly property string diagnosticsFile: historyDir + "/diagnostics.jsonl"
   readonly property string recordingsDir: historyDir + "/recordings"
   readonly property string model: "qwen-audio-3.0-asr-flash"
   readonly property int maxInlineAudioBytes: 7 * 1024 * 1024
@@ -57,13 +57,81 @@ Item {
   property int retryAttempt: 0
   property var recent: [] // [{time, text}] most recent first, max 10
 
+  // Per-transcription timing context. Diagnostic entries intentionally exclude
+  // the API key, audio content, and transcript text.
+  property string diagnosticTraceId: ""
+  property string diagnosticStage: "idle"
+  property double diagnosticPipelineStartMs: 0
+  property double diagnosticStageStartMs: 0
+  property double diagnosticApiStartMs: 0
+  property int diagnosticAudioBytes: 0
+  property int diagnosticRequestCount: 0
+  property var diagnosticQueue: []
+
   // ----------------------------------------------------------- HUD & Features
   property bool autoPaste: true
   property bool showHud: true
   property bool hudVisible: false
   property string hudStatus: "idle" // idle | arming | recording | transcribing | success | error
   property string hudMessage: ""
-  readonly property string activeMicName: mediaDevices.defaultAudioInput ? (mediaDevices.defaultAudioInput.description || "默认麦克风") : "未检测到麦克风"
+  readonly property string activeMicName: Pipewire.defaultAudioSource ? (Pipewire.defaultAudioSource.description || Pipewire.defaultAudioSource.name || "默认麦克风") : "未检测到麦克风"
+
+  // ------------------------------------------------------------- shortcut
+  property string currentShortcut: "F9"
+  readonly property string currentShortcutDisplay: root.friendlyShortcutName(root.currentShortcut)
+  readonly property bool isMouseShortcut: root.currentShortcut.indexOf("mouse:") >= 0
+
+  function loadShortcut() {
+    shortcutReadProc.command = ["bash", "-c",
+      "p=" + shellQuote(root.homeDir + "/.config/omarchy/plugins/qwen-asr/bin/qwen-asr-ctl") + "; "
+      + "if [ -x \"$p\" ]; then \"$p\" get-shortcut; "
+      + "elif [ -x \"$HOME/work/projects/omarchy_plugins/omarchy-plugins/plugins/qwen-asr/bin/qwen-asr-ctl\" ]; then \"$HOME/work/projects/omarchy_plugins/omarchy-plugins/plugins/qwen-asr/bin/qwen-asr-ctl\" get-shortcut; "
+      + "fi"]
+    shortcutReadProc.running = true
+  }
+
+  function setShortcut(newKey, callback) {
+    var k = String(newKey || "").trim()
+    if (k === "") return "快捷键不能为空"
+    shortcutWriteProc.callback = callback
+    shortcutWriteProc.targetKey = k
+    shortcutWriteProc.command = ["bash", "-c",
+      "p=" + shellQuote(root.homeDir + "/.config/omarchy/plugins/qwen-asr/bin/qwen-asr-ctl") + "; "
+      + "if [ -x \"$p\" ]; then \"$p\" set-shortcut " + shellQuote(k) + "; "
+      + "elif [ -x \"$HOME/work/projects/omarchy_plugins/omarchy-plugins/plugins/qwen-asr/bin/qwen-asr-ctl\" ]; then \"$HOME/work/projects/omarchy_plugins/omarchy-plugins/plugins/qwen-asr/bin/qwen-asr-ctl\" set-shortcut " + shellQuote(k) + "; "
+      + "fi"]
+    shortcutWriteProc.running = true
+    return "ok"
+  }
+
+  function friendlyShortcutName(key) {
+    if (!key || key === "") return "未设置"
+    var s = String(key).trim()
+    var parts = s.split("+").map(function(p) { return p.trim() })
+    var names = parts.map(function(p) {
+      if (p === "mouse:275") return "鼠标后退侧键 (Mouse 4)"
+      if (p === "mouse:276") return "鼠标前进侧键 (Mouse 5)"
+      if (p === "mouse:274") return "鼠标中键 (Mouse 3)"
+      if (p === "mouse:273") return "鼠标右键 (Mouse 2)"
+      if (p === "mouse:272") return "鼠标左键 (Mouse 1)"
+      if (p === "mouse:277") return "鼠标扩展键 (Mouse 6)"
+      if (p === "mouse:278") return "鼠标扩展键 (Mouse 7)"
+      if (p === "mouse:279") return "鼠标扩展键 (Mouse 8)"
+      if (p === "SUPER") return "Super"
+      if (p === "CTRL") return "Ctrl"
+      if (p === "ALT") return "Alt"
+      if (p === "SHIFT") return "Shift"
+      if (p === "SPACE") return "空格 (Space)"
+      if (p === "Return") return "回车 (Enter)"
+      return p
+    })
+    return names.join(" + ")
+  }
+
+  function shortcutIcon(key) {
+    if (!key) return "󰌌"
+    return String(key).indexOf("mouse:") >= 0 ? "󰍽" : "󰌌"
+  }
 
   Timer {
     id: hudDismissTimer
@@ -75,16 +143,7 @@ Item {
     }
   }
 
-  Timer {
-    id: armingTimer
-    interval: 240
-    repeat: false
-    onTriggered: {
-      if (root.state === "recording" && root.hudStatus === "arming") {
-        root.hudStatus = "recording"
-      }
-    }
-  }
+
 
   // ----------------------------------------------------------- level meter
   property int barCount: 10
@@ -213,13 +272,8 @@ Item {
   // ------------------------------------------------------------- recording
   property string recPath: ""
   property double recordStartMs: 0
-  property double armStartMs: 0
-  property int coldStartMs: 0
-  property bool isColdStart: false
   property bool discardNextStop: false
   property bool stopWhenReady: false
-
-  property url recUrl: root.recPath === "" ? "" : "file://" + root.recPath
 
   // Runs only while recording so it freezes at the final audio duration when transcribing.
   Timer {
@@ -230,73 +284,10 @@ Item {
     onTriggered: root.elapsedSec++
   }
 
-  MediaDevices {
-    id: mediaDevices
-    onDefaultAudioInputChanged: {
-      if (audioIn && mediaDevices.defaultAudioInput) {
-        audioIn.device = mediaDevices.defaultAudioInput
-      }
-    }
-  }
-
-  CaptureSession {
-    id: session
-    audioInput: AudioInput {
-      id: audioIn
-      device: mediaDevices.defaultAudioInput
-    }
-    recorder: MediaRecorder {
-      id: recorder
-      outputLocation: root.recUrl
-      // The FFmpeg backend chooses AAC/MP4 for this build. The file is
-      // converted to a permanent 16k mono PCM WAV after recording stops.
-      onRecorderStateChanged: {
-        if (recorder.recorderState === MediaRecorder.RecordingState && root.state === "arming") {
-          root.coldStartMs = Math.round(Date.now() - root.armStartMs)
-          root.isColdStart = false
-          root.recordStartMs = Date.now()
-          root.elapsedSec = 0
-          root.resetLevel()
-          if (root.stopWhenReady) {
-            root.stopWhenReady = false
-            root.discardNextStop = true
-            root.hudVisible = false
-            root.hudStatus = "idle"
-            recorder.stop()
-            return
-          }
-          root.state = "recording"
-          var elapsed = Date.now() - root.armStartMs
-          if (elapsed < 240) {
-            armingTimer.interval = Math.max(60, 240 - elapsed)
-            armingTimer.restart()
-          } else {
-            root.hudStatus = "recording"
-          }
-          return
-        }
-
-        if (recorder.recorderState === MediaRecorder.StoppedState && root.recPath !== "") {
-          var path = root.recPath
-          root.recPath = ""
-          if (root.discardNextStop) {
-            root.discardNextStop = false
-            root.stopWhenReady = false
-            root.state = "idle"
-            root.hudVisible = false
-            root.hudStatus = "idle"
-            removeFile(path)
-            return
-          }
-          root.transcribe(path)
-        }
-      }
-      onErrorOccurred: function(error, errorString) {
-        root.recPath = ""
-        root.discardNextStop = false
-        root.stopWhenReady = false
-        root.fail("录音失败：" + errorString, "recording")
-      }
+  Process {
+    id: recordProc
+    onExited: function(code) {
+      root.onRecordExited(code)
     }
   }
 
@@ -304,44 +295,67 @@ Item {
     if (root.state !== "idle") return
     root.clearError()
 
-    var dev = mediaDevices.defaultAudioInput
-    if (!dev || !dev.id || dev.id === "") {
+    if (!Pipewire.defaultAudioSource) {
       root.fail("未检测到可用的录音设备，请检查麦克风", "recording")
       return
     }
-    audioIn.device = dev
 
     var now = Date.now()
-    root.recPath = "/tmp/qwen-asr-" + now + ".m4a"
-    root.armStartMs = now
-    root.coldStartMs = 0
-    root.isColdStart = true
-    root.recordStartMs = 0
+    var name = "qwen-asr-" + now + ".wav"
+    root.recPath = root.recordingsDir + "/" + name
+    root.recordStartMs = now
     root.discardNextStop = false
     root.stopWhenReady = false
     root.elapsedSec = 0
     root.resetLevel()
-    root.state = "arming"
-    root.hudStatus = "arming"
+    root.state = "recording"
+    root.hudStatus = "recording"
     root.hudVisible = true
     hudDismissTimer.stop()
-    recorder.record()
+
+    recordProc.command = ["bash", "-c",
+      "mkdir -p " + shellQuote(root.recordingsDir)
+      + " && exec pw-record --rate " + root.sampleRate
+      + " --channels " + root.channels
+      + " --format s16 " + shellQuote(root.recPath)]
+    recordProc.running = true
   }
 
   function stopRecording() {
-    if (root.state === "arming") {
-      // Do not treat key-down time as recorded audio. Once the backend really
-      // reaches RecordingState, stop immediately and discard this tap.
-      root.stopWhenReady = true
-      return
-    }
     if (root.state !== "recording") return
     if (Date.now() - root.recordStartMs < root.minRecordingMs) {
       root.discardNextStop = true
       root.hudVisible = false
       root.hudStatus = "idle"
     }
-    recorder.stop() // async: transcribe runs from StoppedState
+    recordProc.running = false
+  }
+
+  function onRecordExited(code) {
+    var path = root.recPath
+    root.recPath = ""
+
+    if (root.discardNextStop) {
+      root.discardNextStop = false
+      root.stopWhenReady = false
+      root.state = "idle"
+      root.hudVisible = false
+      root.hudStatus = "idle"
+      removeFile(path)
+      return
+    }
+
+    if (root.state !== "recording") {
+      removeFile(path)
+      return
+    }
+
+    if (path === "") {
+      root.fail("录音失败：未指定音频输出路径", "recording")
+      return
+    }
+
+    root.transcribe(path)
   }
 
   // ---------------------------------------------------------------- ASR
@@ -351,40 +365,43 @@ Item {
     root.hudVisible = true
     hudDismissTimer.stop()
     root.retryAttempt = 0
-    var name = path.slice(path.lastIndexOf("/") + 1, -4) + ".wav"
-    var out = root.recordingsDir + "/" + name
-    convertProc.command = ["bash", "-c",
-      "mkdir -p " + shellQuote(root.recordingsDir)
-      + " && exec ffmpeg -y -loglevel error -i " + shellQuote(path)
-      + " -ar " + root.sampleRate + " -ac " + root.channels
-      + " -c:a pcm_s16le " + shellQuote(out)]
-    convertProc.srcPath = path
-    convertProc.outPath = out
-    convertProc.running = true
-  }
 
-  function onConverted(srcPath, outPath, ok, errorText) {
-    if (!ok) {
-      removeFile(srcPath)
-      removeFile(outPath)
-      var detail = errorText && errorText !== "" ? "（" + errorText.split("\n")[0] + "）" : ""
-      root.fail("录音格式转换失败" + detail, "recording")
-      return
-    }
-    removeFile(srcPath)
-    speechProbeProc.command = ["ffmpeg", "-hide_banner", "-nostats", "-i", outPath,
+    var filename = path.slice(path.lastIndexOf("/") + 1)
+    root.diagnosticTraceId = filename.endsWith(".wav") ? filename.slice(0, -4) : filename
+    root.diagnosticStage = "speech_probe"
+    root.diagnosticPipelineStartMs = Date.now()
+    root.diagnosticStageStartMs = root.diagnosticPipelineStartMs
+    root.diagnosticApiStartMs = 0
+    root.diagnosticAudioBytes = 0
+    root.diagnosticRequestCount = 0
+    root.appendDiagnostic("pipeline_started", {
+      model: root.model,
+      recording_seconds: root.elapsedSec
+    })
+
+    speechProbeProc.command = ["ffmpeg", "-hide_banner", "-nostats", "-i", path,
       "-af", "silencedetect=noise=-25dB:d=0.2", "-f", "null", "-"]
-    speechProbeProc.contextPath = outPath
+    speechProbeProc.contextPath = path
     speechProbeProc.running = true
   }
 
   function onSpeechProbeReady(log, path, ok) {
     if (!ok) {
+      root.appendDiagnostic("stage_finished", {
+        stage: "speech_probe",
+        duration_ms: Math.round(Date.now() - root.diagnosticStageStartMs),
+        outcome: "error"
+      })
       root.fail("无法检测录音中的有效语音；WAV 已保留", "recording")
       return
     }
     var durationMatch = String(log).match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/)
     if (!durationMatch) {
+      root.appendDiagnostic("stage_finished", {
+        stage: "speech_probe",
+        duration_ms: Math.round(Date.now() - root.diagnosticStageStartMs),
+        outcome: "invalid_duration"
+      })
       root.fail("无法读取录音时长；WAV 已保留", "recording")
       return
     }
@@ -394,10 +411,19 @@ Item {
     var silenceRe = /silence_duration:\s*([0-9.]+)/g
     var match = null
     while ((match = silenceRe.exec(String(log))) !== null) silence += Number(match[1])
+    root.appendDiagnostic("stage_finished", {
+      stage: "speech_probe",
+      duration_ms: Math.round(Date.now() - root.diagnosticStageStartMs),
+      outcome: "success",
+      audio_duration_ms: Math.round(duration * 1000),
+      detected_speech_ms: Math.round(Math.max(0, duration - silence) * 1000)
+    })
     if (duration < 1 || duration - silence < 0.6) {
       root.fail("未检测到有效语音；WAV 已保留", "input")
       return
     }
+    root.diagnosticStage = "base64"
+    root.diagnosticStageStartMs = Date.now()
     base64Proc.command = ["base64", "-w0", path]
     base64Proc.contextPath = path
     base64Proc.running = true
@@ -405,19 +431,39 @@ Item {
 
   function onBase64Ready(b64, path) {
     if (b64 === null) {
+      root.appendDiagnostic("stage_finished", {
+        stage: "base64",
+        duration_ms: Math.round(Date.now() - root.diagnosticStageStartMs),
+        outcome: "error"
+      })
       root.fail("读取录音文件失败；WAV 已保留", "recording")
       return
     }
-    // base64 length * 3/4 = decoded bytes.
-    if (b64.length * 0.75 > root.maxInlineAudioBytes) {
+    root.diagnosticAudioBytes = root.decodedBase64Bytes(b64)
+    root.appendDiagnostic("stage_finished", {
+      stage: "base64",
+      duration_ms: Math.round(Date.now() - root.diagnosticStageStartMs),
+      outcome: "success",
+      audio_bytes: root.diagnosticAudioBytes
+    })
+    if (root.diagnosticAudioBytes > root.maxInlineAudioBytes) {
       root.fail("录音过长；当前 Base64 接口请控制在约 3 分 45 秒以内", "input")
       return
     }
+    root.diagnosticStage = "api"
+    root.diagnosticApiStartMs = Date.now()
     root.submit(b64, 0)
   }
 
   function submit(b64, attempt) {
     root.retryAttempt = attempt
+    root.diagnosticRequestCount++
+    var attemptNumber = attempt + 1
+    var requestStartMs = Date.now()
+    root.appendDiagnostic("request_started", {
+      attempt: attemptNumber,
+      audio_bytes: root.diagnosticAudioBytes
+    })
     var dataUri = "data:audio/wav;base64," + b64
     var payload = {
       model: root.model,
@@ -443,12 +489,36 @@ Item {
     xhr.onreadystatechange = function() {
       if (xhr.readyState !== XMLHttpRequest.DONE || settled) return
       settled = true
+      var elapsedMs = Math.round(Date.now() - requestStartMs)
+      var requestId = root.responseRequestId(xhr)
       if (xhr.status === 0) {
+        root.appendDiagnostic("request_finished", {
+          attempt: attemptNumber,
+          duration_ms: elapsedMs,
+          http_status: 0,
+          outcome: "network_error",
+          request_id: requestId
+        })
         root.fail("网络不可用，请检查连接后重试", "offline")
         return
       }
       if (xhr.status !== 200) {
-        if (root.isNoWordsError(xhr.responseText) && attempt < root.maxNoWordsRetries) {
+        var noWords = root.isNoWordsError(xhr.responseText)
+        var shouldRetry = noWords && attempt < root.maxNoWordsRetries
+        root.appendDiagnostic("request_finished", {
+          attempt: attemptNumber,
+          duration_ms: elapsedMs,
+          http_status: xhr.status,
+          outcome: shouldRetry ? "retry_no_words"
+            : (noWords ? "no_words_exhausted" : "http_error"),
+          request_id: requestId
+        })
+        if (shouldRetry) {
+          root.appendDiagnostic("retry_scheduled", {
+            previous_attempt: attemptNumber,
+            next_attempt: attemptNumber + 1,
+            reason: "ASR_RESPONSE_HAVE_NO_WORDS"
+          })
           root.submit(b64, attempt + 1)
           return
         }
@@ -457,19 +527,47 @@ Item {
       }
       var text = root.parseRecognition(xhr.responseText)
       if (text === null) {
+        root.appendDiagnostic("request_finished", {
+          attempt: attemptNumber,
+          duration_ms: elapsedMs,
+          http_status: xhr.status,
+          outcome: "empty_response",
+          request_id: requestId
+        })
         root.fail(root.apiErrorText(xhr.responseText, "ASR 返回为空"), "asr")
         return
       }
+      root.appendDiagnostic("request_finished", {
+        attempt: attemptNumber,
+        duration_ms: elapsedMs,
+        http_status: xhr.status,
+        outcome: "success",
+        request_id: requestId
+      })
       root.finishTranscript(text)
     }
     xhr.ontimeout = function() {
       if (settled) return
       settled = true
+      root.appendDiagnostic("request_finished", {
+        attempt: attemptNumber,
+        duration_ms: Math.round(Date.now() - requestStartMs),
+        http_status: 0,
+        outcome: "timeout",
+        request_id: ""
+      })
       root.fail("ASR 请求超时", "asr")
     }
     xhr.onerror = function() {
       if (settled) return
       settled = true
+      root.appendDiagnostic("request_finished", {
+        attempt: attemptNumber,
+        duration_ms: Math.round(Date.now() - requestStartMs),
+        http_status: 0,
+        outcome: "network_error",
+        request_id: ""
+      })
       root.fail("网络不可用，请检查连接后重试", "offline")
     }
     xhr.timeout = 120000
@@ -478,6 +576,16 @@ Item {
 
   function finishTranscript(rawText) {
     var text = root.cleanTranscript(rawText)
+    root.appendDiagnostic("pipeline_finished", {
+      outcome: "success",
+      total_ms: Math.round(Date.now() - root.diagnosticPipelineStartMs),
+      api_ms: Math.round(Date.now() - root.diagnosticApiStartMs),
+      requests: root.diagnosticRequestCount,
+      audio_bytes: root.diagnosticAudioBytes,
+      transcript_chars: text.length
+    })
+    root.diagnosticTraceId = ""
+    root.diagnosticStage = "idle"
     root.lastTranscript = text
     root.state = "idle"
     root.clearError()
@@ -518,6 +626,20 @@ Item {
   }
 
   function fail(message, kind) {
+    if (root.diagnosticTraceId !== "") {
+      root.appendDiagnostic("pipeline_finished", {
+        outcome: "error",
+        failed_stage: root.diagnosticStage,
+        error_kind: kind || "asr",
+        total_ms: Math.round(Date.now() - root.diagnosticPipelineStartMs),
+        api_ms: root.diagnosticApiStartMs > 0
+          ? Math.round(Date.now() - root.diagnosticApiStartMs) : 0,
+        requests: root.diagnosticRequestCount,
+        audio_bytes: root.diagnosticAudioBytes
+      })
+      root.diagnosticTraceId = ""
+      root.diagnosticStage = "idle"
+    }
     root.state = "idle"
     root.retryAttempt = 0
     root.lastError = message
@@ -569,6 +691,32 @@ Item {
     return String(body || "").indexOf("ASR_RESPONSE_HAVE_NO_WORDS") >= 0
   }
 
+  function decodedBase64Bytes(b64) {
+    var value = String(b64 || "")
+    var padding = 0
+    if (value.slice(-2) === "==") padding = 2
+    else if (value.slice(-1) === "=") padding = 1
+    return Math.max(0, Math.floor(value.length * 3 / 4) - padding)
+  }
+
+  function responseRequestId(xhr) {
+    var requestId = ""
+    try {
+      requestId = String(xhr.getResponseHeader("x-request-id")
+        || xhr.getResponseHeader("x-dashscope-request-id") || "")
+    } catch (e) {
+      requestId = ""
+    }
+    if (requestId !== "") return requestId
+    try {
+      var body = JSON.parse(xhr.responseText || "{}")
+      requestId = String(body.request_id || ((body.output || {}).request_id) || "")
+    } catch (e2) {
+      requestId = ""
+    }
+    return requestId
+  }
+
   // --------------------------------------------------------------- cleaner
   // Port of src/domain/transcript_cleaner.cpp. Lookbehinds become capture
   // groups, \p{...} becomes explicit CJK/ASCII classes.
@@ -601,9 +749,50 @@ Item {
     var sticky = new RegExp("([\\u4e00-\\u9fff])([嗯呃额唔]{1,3})(?=[\\u4e00-\\u9fffA-Za-z0-9])", "g")
     cleaned = cleaned.replace(sticky, "$1")
 
+    cleaned = root.removeCjkSpaces(cleaned)
     cleaned = root.normalizePunctuation(cleaned)
+    cleaned = root.removeCjkSpaces(cleaned)
     cleaned = root.restoreQuoted(cleaned, protectedText.placeholders)
     return cleaned.trim()
+  }
+
+  function removeCjkSpaces(text) {
+    var cjk = "[\\u4e00-\\u9fff\\u3400-\\u4dbf\\uf900-\\ufaff]"
+    var cjkPunct = "[\\u3000-\\u303f\\uff01-\\uff0f\\uff1a-\\uff20\\uff3b-\\uff40\\uff5b-\\uff65，。！？；：、“”‘’《》（）【】…—]"
+
+    var res = String(text || "")
+
+    // 1. Remove spaces between two CJK characters: "中 文" -> "中文"
+    var reCjkCjk = new RegExp("(" + cjk + ")\\s+(" + cjk + ")", "g")
+    var prev = ""
+    while (prev !== res) {
+      prev = res
+      res = res.replace(reCjkCjk, "$1$2")
+    }
+
+    // 2. Remove spaces between CJK char and punctuation: "中 文 ，" -> "中文，"
+    var reCjkPunct = new RegExp("(" + cjk + ")\\s+(" + cjkPunct + ")", "g")
+    prev = ""
+    while (prev !== res) {
+      prev = res
+      res = res.replace(reCjkPunct, "$1$2")
+    }
+
+    var rePunctCjk = new RegExp("(" + cjkPunct + ")\\s+(" + cjk + ")", "g")
+    prev = ""
+    while (prev !== res) {
+      prev = res
+      res = res.replace(rePunctCjk, "$1$2")
+    }
+
+    // 3. Remove spaces around opening and closing brackets/quotes
+    res = res.replace(/([“「『《〈（(\[{])\s+/g, "$1")
+    res = res.replace(/\s+([”」』》〉）)\]}])/g, "$1")
+
+    // 4. Collapse multiple English spaces into single space
+    res = res.replace(/[ \t]+/g, " ")
+
+    return res.trim()
   }
 
   function protectQuoted(text) {
@@ -676,6 +865,38 @@ Item {
       + " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds())
   }
 
+  function fmtTimeMs(d) {
+    var ms = d.getMilliseconds()
+    var suffix = ms < 10 ? "00" + ms : (ms < 100 ? "0" + ms : "" + ms)
+    return root.fmtTime(d) + "." + suffix
+  }
+
+  function appendDiagnostic(eventName, fields) {
+    var now = Date.now()
+    var entry = {
+      time: root.fmtTimeMs(new Date(now)),
+      epoch_ms: now,
+      event: eventName,
+      trace_id: root.diagnosticTraceId
+    }
+    var values = fields || {}
+    for (var key in values) entry[key] = values[key]
+    root.diagnosticQueue = root.diagnosticQueue.concat(JSON.stringify(entry))
+    root.flushDiagnosticQueue()
+  }
+
+  function flushDiagnosticQueue() {
+    if (diagnosticAppendProc.running || root.diagnosticQueue.length === 0) return
+    var line = root.diagnosticQueue[0]
+    root.diagnosticQueue = root.diagnosticQueue.slice(1)
+    diagnosticAppendProc.command = ["bash", "-c",
+      "mkdir -p " + shellQuote(root.historyDir)
+      + " && umask 077 && printf '%s\\n' " + shellQuote(line)
+      + " >> " + shellQuote(root.diagnosticsFile)
+      + " && chmod 600 " + shellQuote(root.diagnosticsFile)]
+    diagnosticAppendProc.running = true
+  }
+
   // ---------------------------------------------------------------- helpers
   function shellQuote(value) {
     return "'" + String(value).replace(/'/g, "'\\''") + "'"
@@ -727,6 +948,38 @@ Item {
   }
 
   Process {
+    id: shortcutReadProc
+    stdout: StdioCollector { waitForEnd: true }
+    onExited: function(code) {
+      if (code === 0 && shortcutReadProc.stdout) {
+        var key = shortcutReadProc.stdout.text.trim()
+        if (key !== "") root.currentShortcut = key
+      }
+    }
+  }
+
+  Process {
+    id: shortcutWriteProc
+    property var callback: null
+    property string targetKey: ""
+    onExited: function(code) {
+      if (code === 0) {
+        if (shortcutWriteProc.targetKey !== "") {
+          root.currentShortcut = shortcutWriteProc.targetKey
+        }
+        var icon = root.shortcutIcon(root.currentShortcut)
+        var name = root.friendlyShortcutName(root.currentShortcut)
+        root.notify(icon, "Qwen ASR 快捷键已生效", "按住 [" + name + "] 即可直接语音输入", "low")
+        if (shortcutWriteProc.callback) shortcutWriteProc.callback(true)
+      } else {
+        root.fail("修改快捷键失败", "recording")
+        if (shortcutWriteProc.callback) shortcutWriteProc.callback(false)
+      }
+      shortcutWriteProc.callback = null
+    }
+  }
+
+  Process {
     id: keyWriteProc
     property var callback: null
     onExited: function(code) {
@@ -743,20 +996,7 @@ Item {
     id: pasteProc
   }
 
-  Process {
-    id: convertProc
-    property string srcPath: ""
-    property string outPath: ""
-    stderr: StdioCollector { waitForEnd: true }
-    onExited: function(code) {
-      var src = convertProc.srcPath
-      var out = convertProc.outPath
-      var err = convertProc.stderr ? convertProc.stderr.text.trim() : ""
-      convertProc.srcPath = ""
-      convertProc.outPath = ""
-      root.onConverted(src, out, code === 0, err)
-    }
-  }
+
 
   Process {
     id: speechProbeProc
@@ -785,6 +1025,11 @@ Item {
   Process {
     id: historyAppendProc
     onExited: function() { root.loadHistory() }
+  }
+
+  Process {
+    id: diagnosticAppendProc
+    onExited: function() { root.flushDiagnosticQueue() }
   }
 
   Process {
@@ -828,10 +1073,18 @@ Item {
     function level(): string {
       return root.state + "|" + root.level.toFixed(3) + "|" + root.barLevels.length
     }
+    function shortcut(): string {
+      return root.currentShortcut
+    }
+    function setShortcut(key: string): string {
+      return root.setShortcut(key, null)
+    }
   }
 
   Component.onCompleted: {
+    root.appendDiagnostic("plugin_loaded", { model: root.model })
     root.loadApiKey()
+    root.loadShortcut()
     root.loadHistory()
   }
 }

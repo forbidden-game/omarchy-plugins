@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "qwen-asr",
   "name": "Qwen ASR",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "XiezhaoPan",
   "description": "Push-to-talk Qwen Audio 3.0 ASR in the bar: hold to record with a live level meter, release to transcribe into the clipboard.",
   "kinds": [

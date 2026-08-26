@@ -1,0 +1,23 @@
+[Unit]
+Description=Omarchy Antigravity OpenAI-compatible streaming proxy
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=%h/.config/omarchy/plugins/eipi10.agents/bin/omarchy-antigravity-ctl proxy-sync-auth
+ExecStart=%h/.local/bin/cli-proxy-api --config %h/.config/omarchy/agents/antigravity/proxy/config.yaml
+ExecStartPost=%h/.config/omarchy/plugins/eipi10.agents/bin/omarchy-antigravity-ctl proxy-wait-ready
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/omarchy/agents/antigravity/proxy
+ReadWritePaths=%h/.config/omarchy/agents/antigravity/auth
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=default.target

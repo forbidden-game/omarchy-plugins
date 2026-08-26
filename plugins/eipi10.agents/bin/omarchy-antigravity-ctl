@@ -1,6 +1,6 @@
 #!/usr/bin/python3
-# omarchy:summary=Antigravity account switching, silent OAuth authorization, and standalone quota fetcher
-# omarchy:args=[switch <id>] [oauth-start] [oauth-cancel] [refresh [id]]
+# omarchy:summary=Antigravity accounts, OAuth, quotas, and local pi/omp streaming proxy
+# omarchy:args=[switch <id>] [oauth-start] [oauth-cancel] [refresh [id]] [proxy-*]
 # omarchy:hidden=true
 """Antigravity control helper for Omarchy Agents plugin.
 
@@ -9,14 +9,18 @@ silent loopback OAuth authorization, token auto-refresh, and live Google Cloud C
 """
 
 import http.server
+import errno
 import json
 import os
+import re
+import secrets
 import shutil
 import signal
 import socket
 import socketserver
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -30,9 +34,49 @@ HOME = Path.home()
 ANTIGRAVITY_DIR = HOME / ".config" / "omarchy" / "agents" / "antigravity"
 ACCOUNTS_INDEX = ANTIGRAVITY_DIR / "accounts.json"
 ACCOUNTS_DIR = ANTIGRAVITY_DIR / "accounts"
+AUTH_DIR = ANTIGRAVITY_DIR / "auth"
+BACKUPS_DIR = ANTIGRAVITY_DIR / "backups"
 OAUTH_CONFIG_FILE = ANTIGRAVITY_DIR / "oauth.json"
 LEGACY_DIR = HOME / ".antigravity_tools"
 PID_FILE = Path("/tmp/omarchy-antigravity-oauth.pid")
+PROXY_DIR = ANTIGRAVITY_DIR / "proxy"
+LEGACY_PROXY_AUTH_DIR = PROXY_DIR / "auth"
+PROXY_CONFIG_FILE = PROXY_DIR / "config.yaml"
+PROXY_KEY_FILE = PROXY_DIR / "api-key"
+PROXY_WATCHDOG_STATE_FILE = PROXY_DIR / "watchdog.json"
+PROXY_BINARY = HOME / ".local" / "bin" / "cli-proxy-api"
+PROXY_SERVICE_NAME = "omarchy-antigravity-proxy.service"
+PROXY_SERVICE_FILE = HOME / ".config" / "systemd" / "user" / PROXY_SERVICE_NAME
+PROXY_WATCHDOG_SERVICE_NAME = "omarchy-antigravity-proxy-watchdog.service"
+PROXY_WATCHDOG_TIMER_NAME = "omarchy-antigravity-proxy-watchdog.timer"
+PROXY_WATCHDOG_SERVICE_FILE = HOME / ".config" / "systemd" / "user" / PROXY_WATCHDOG_SERVICE_NAME
+PROXY_WATCHDOG_TIMER_FILE = HOME / ".config" / "systemd" / "user" / PROXY_WATCHDOG_TIMER_NAME
+PROXY_PORT = 8317
+PROXY_BASE_URL = f"http://127.0.0.1:{PROXY_PORT}/v1"
+PI_MODELS_FILE = HOME / ".pi" / "agent" / "models.json"
+OMP_MODELS_FILE = HOME / ".omp" / "agent" / "models.yml"
+PROXY_PROVIDER_ID = "antigravity-proxy"
+PROXY_CLIENT_API = "openai-responses"
+PROXY_MODELS = [
+    {
+        "id": "gemini-3.7-flash-high",
+        "name": "Gemini 3.7 Flash High · Antigravity",
+        "reasoning": True,
+        "input": ["text", "image"],
+        "contextWindow": 1048576,
+        "maxTokens": 65536,
+    },
+    {
+        "id": "claude-opus-4-6-thinking",
+        "name": "Claude Opus 4.6 Thinking · Antigravity",
+        "reasoning": True,
+        "input": ["text", "image"],
+        "contextWindow": 250000,
+        "maxTokens": 64000,
+    },
+]
+MANAGED_OMP_START = "# BEGIN eipi10.agents antigravity proxy"
+MANAGED_OMP_END = "# END eipi10.agents antigravity proxy"
 
 
 def _load_oauth_credentials():
@@ -68,10 +112,26 @@ QUOTA_ENDPOINTS = [
 ]
 
 
+def enforce_mode(path, mode):
+    """Set secure permissions, tolerating a read-only sandbox when already correct."""
+    path = Path(path)
+    try:
+        os.chmod(path, mode)
+    except OSError as exc:
+        current_mode = path.stat().st_mode & 0o777 if path.exists() else None
+        if exc.errno in (errno.EROFS, errno.EPERM) and current_mode == mode:
+            return
+        raise
+
+
 def ensure_storage_migrated():
     """Ensure ~/.config/omarchy/agents/antigravity exists and auto-migrate from ~/.antigravity_tools if needed."""
-    ANTIGRAVITY_DIR.mkdir(parents=True, exist_ok=True)
-    ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
+    ANTIGRAVITY_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    AUTH_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    enforce_mode(ANTIGRAVITY_DIR, 0o700)
+    enforce_mode(ACCOUNTS_DIR, 0o700)
+    enforce_mode(AUTH_DIR, 0o700)
 
     if not ACCOUNTS_INDEX.is_file():
         legacy_index = LEGACY_DIR / "accounts.json"
@@ -86,10 +146,515 @@ def ensure_storage_migrated():
                 pass
 
     if not ACCOUNTS_INDEX.is_file():
-        ACCOUNTS_INDEX.write_text(
+        atomic_write(
+            ACCOUNTS_INDEX,
             json.dumps({"version": "2.0", "accounts": [], "current_account_id": "", "current_target_ide": "agy"}, indent=2) + "\n",
-            encoding="utf-8"
+            0o600,
         )
+
+    for secret_file in [ACCOUNTS_INDEX, OAUTH_CONFIG_FILE, *ACCOUNTS_DIR.glob("*.json"), *AUTH_DIR.glob("*.json")]:
+        if secret_file.is_file():
+            enforce_mode(secret_file, 0o600)
+
+
+def atomic_write(path, text, mode=0o600):
+    """Write a file atomically without exposing partial or permissive content."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(temp_name, mode)
+        os.replace(temp_name, path)
+    finally:
+        try:
+            Path(temp_name).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def ensure_proxy_layout():
+    ensure_storage_migrated()
+    PROXY_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(PROXY_DIR, 0o700)
+
+
+def ensure_proxy_key():
+    ensure_proxy_layout()
+    if PROXY_KEY_FILE.is_file():
+        key = PROXY_KEY_FILE.read_text(encoding="utf-8").strip()
+        if key:
+            os.chmod(PROXY_KEY_FILE, 0o600)
+            return key
+    key = "agy_" + secrets.token_urlsafe(32)
+    atomic_write(PROXY_KEY_FILE, key + "\n", 0o600)
+    return key
+
+
+def ensure_proxy_config():
+    key = ensure_proxy_key()
+    config = f"""host: "127.0.0.1"
+port: {PROXY_PORT}
+auth-dir: "{AUTH_DIR}"
+api-keys:
+  - {json.dumps(key)}
+remote-management:
+  allow-remote: false
+  secret-key: ""
+  disable-control-panel: true
+debug: false
+logging-to-file: false
+usage-statistics-enabled: false
+request-retry: 1
+max-retry-interval: 5
+routing:
+  strategy: "round-robin"
+  session-affinity: true
+  session-affinity-ttl: "1h"
+streaming:
+  keepalive-seconds: 15
+  bootstrap-retries: 1
+"""
+    atomic_write(PROXY_CONFIG_FILE, config, 0o600)
+    return key
+
+
+def proxy_sync_auth():
+    """Reconcile account membership without overwriting CLIProxyAPI-owned tokens."""
+    ensure_proxy_config()
+    try:
+        index_data = json.loads(ACCOUNTS_INDEX.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(json.dumps({"status": "error", "error": f"Failed to read accounts: {exc}"}))
+        return 1
+
+    expected = set()
+    for stub in index_data.get("accounts", []):
+        account_id = str(stub.get("id") or "")
+        if not account_id or stub.get("disabled"):
+            continue
+        source = ACCOUNTS_DIR / f"{account_id}.json"
+        if not source.is_file():
+            continue
+        try:
+            account = json.loads(source.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if account.get("disabled"):
+            continue
+
+        safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", account_id)
+        target = AUTH_DIR / f"antigravity-{safe_id}.json"
+        expected.add(target.name)
+        if target.is_file():
+            os.chmod(target, 0o600)
+            continue
+
+        legacy_proxy = LEGACY_PROXY_AUTH_DIR / target.name
+        token = account.get("token") or {}
+        if legacy_proxy.is_file():
+            atomic_write(target, legacy_proxy.read_text(encoding="utf-8"), 0o600)
+        elif token.get("refresh_token") or token.get("access_token"):
+            credential = {
+                "type": "antigravity",
+                "email": account.get("email") or token.get("email") or "",
+                "access_token": token.get("access_token") or "",
+                "refresh_token": token.get("refresh_token") or "",
+                "expires_in": int(token.get("expires_in") or 3599),
+                "project_id": token.get("project_id") or "aicode-consumers",
+                "token_type": token.get("token_type") or "Bearer",
+            }
+            atomic_write(target, json.dumps(credential, indent=2) + "\n", 0o600)
+
+    for stale in AUTH_DIR.glob("antigravity-*.json"):
+        if stale.name not in expected:
+            stale.unlink(missing_ok=True)
+
+    available = len(list(AUTH_DIR.glob("antigravity-*.json")))
+    result = {"status": "synced", "accounts": available}
+    print(json.dumps(result))
+    return 0 if available else 1
+
+
+def credentials_migrate():
+    """Move active credentials into one CLIProxyAPI-owned auth directory."""
+    if proxy_is_active():
+        print(json.dumps({"status": "error", "error": "Stop the proxy before migrating credentials"}))
+        return 1
+
+    ensure_storage_migrated()
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = BACKUPS_DIR / f"credential-migration-{timestamp}"
+    backup_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+    os.chmod(BACKUPS_DIR, 0o700)
+    os.chmod(backup_dir, 0o700)
+
+    for source in [
+        ACCOUNTS_INDEX,
+        OAUTH_CONFIG_FILE,
+        *ACCOUNTS_DIR.glob("*.json"),
+        *AUTH_DIR.glob("*.json"),
+        *LEGACY_PROXY_AUTH_DIR.glob("*.json"),
+    ]:
+        if not source.is_file():
+            continue
+        relative = source.relative_to(ANTIGRAVITY_DIR)
+        target = backup_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(target.parent, 0o700)
+        shutil.copy2(source, target)
+        os.chmod(target, 0o600)
+
+    index_data = json.loads(ACCOUNTS_INDEX.read_text(encoding="utf-8"))
+    migrated = 0
+    for stub in index_data.get("accounts", []):
+        account_id = str(stub.get("id") or "")
+        if not account_id:
+            continue
+        safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", account_id)
+        credential_file = AUTH_DIR / f"antigravity-{safe_id}.json"
+        legacy_proxy = LEGACY_PROXY_AUTH_DIR / credential_file.name
+        account_file = ACCOUNTS_DIR / f"{account_id}.json"
+        account = json.loads(account_file.read_text(encoding="utf-8")) if account_file.is_file() else {}
+        token = account.get("token") or {}
+
+        if legacy_proxy.is_file():
+            credential = json.loads(legacy_proxy.read_text(encoding="utf-8"))
+        elif credential_file.is_file():
+            credential = json.loads(credential_file.read_text(encoding="utf-8"))
+        elif token.get("refresh_token") or token.get("access_token"):
+            credential = {
+                "type": "antigravity",
+                "email": account.get("email") or token.get("email") or stub.get("email") or "",
+                "access_token": token.get("access_token") or "",
+                "refresh_token": token.get("refresh_token") or "",
+                "expires_in": int(token.get("expires_in") or 3599),
+                "project_id": token.get("project_id") or "aicode-consumers",
+                "token_type": token.get("token_type") or "Bearer",
+            }
+        else:
+            raise RuntimeError(f"No credential found for account {account_id}")
+
+        credential["type"] = "antigravity"
+        credential["email"] = credential.get("email") or account.get("email") or stub.get("email") or ""
+        credential["project_id"] = credential.get("project_id") or token.get("project_id") or "aicode-consumers"
+        atomic_write(credential_file, json.dumps(credential, indent=2) + "\n", 0o600)
+
+        account["id"] = account_id
+        account["email"] = account.get("email") or stub.get("email") or credential.get("email") or ""
+        account["name"] = account.get("name") or stub.get("name") or account["email"]
+        account["project_id"] = credential["project_id"]
+        account.pop("token", None)
+        atomic_write(account_file, json.dumps(account, indent=2) + "\n", 0o600)
+        migrated += 1
+
+    for legacy_file in LEGACY_PROXY_AUTH_DIR.glob("antigravity-*.json"):
+        legacy_file.unlink(missing_ok=True)
+
+    for directory in [backup_dir, *(path for path in backup_dir.rglob("*") if path.is_dir())]:
+        os.chmod(directory, 0o700)
+
+    ensure_proxy_config()
+    print(json.dumps({
+        "status": "migrated",
+        "accounts": migrated,
+        "auth_dir": str(AUTH_DIR),
+        "backup": str(backup_dir),
+    }))
+    return 0
+
+
+def proxy_provider_config():
+    key_command = f"!cat {PROXY_KEY_FILE}"
+    models = []
+    for model in PROXY_MODELS:
+        configured = dict(model)
+        configured["cost"] = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+        models.append(configured)
+    return {
+        "baseUrl": PROXY_BASE_URL,
+        "apiKey": key_command,
+        "api": PROXY_CLIENT_API,
+        "models": models,
+    }
+
+
+def proxy_configure_pi():
+    PI_MODELS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data = {}
+    mode = 0o600
+    if PI_MODELS_FILE.is_file():
+        mode = PI_MODELS_FILE.stat().st_mode & 0o777
+        try:
+            data = json.loads(PI_MODELS_FILE.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"Failed to read {PI_MODELS_FILE}: {exc}") from exc
+    providers = data.setdefault("providers", {})
+    providers[PROXY_PROVIDER_ID] = proxy_provider_config()
+    atomic_write(PI_MODELS_FILE, json.dumps(data, indent=2) + "\n", mode)
+
+
+def proxy_configure_omp():
+    OMP_MODELS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    mode = 0o600
+    text = "providers:\n"
+    if OMP_MODELS_FILE.is_file():
+        mode = OMP_MODELS_FILE.stat().st_mode & 0o777
+        text = OMP_MODELS_FILE.read_text(encoding="utf-8")
+
+    start = text.find(MANAGED_OMP_START)
+    if start >= 0:
+        end = text.find(MANAGED_OMP_END, start)
+        if end >= 0:
+            end += len(MANAGED_OMP_END)
+            text = (text[:start].rstrip() + "\n" + text[end:].lstrip("\n")).rstrip() + "\n"
+
+    lines = [
+        MANAGED_OMP_START,
+        f"  {PROXY_PROVIDER_ID}:",
+        f"    baseUrl: {PROXY_BASE_URL}",
+        f"    apiKey: \"!cat {PROXY_KEY_FILE}\"",
+        f"    api: {PROXY_CLIENT_API}",
+        "    models:",
+    ]
+    for model in PROXY_MODELS:
+        lines.extend([
+            f"      - id: {model['id']}",
+            f"        name: {model['name']}",
+            f"        reasoning: {'true' if model['reasoning'] else 'false'}",
+            f"        input: [{', '.join(model['input'])}]",
+            f"        contextWindow: {model['contextWindow']}",
+            f"        maxTokens: {model['maxTokens']}",
+            "        cost:",
+            "          input: 0",
+            "          output: 0",
+            "          cacheRead: 0",
+            "          cacheWrite: 0",
+        ])
+    lines.append(MANAGED_OMP_END)
+    atomic_write(OMP_MODELS_FILE, text.rstrip() + "\n\n" + "\n".join(lines) + "\n", mode)
+
+
+def proxy_configure_clients():
+    ensure_proxy_config()
+    proxy_configure_pi()
+    proxy_configure_omp()
+    print(json.dumps({
+        "status": "configured",
+        "clients": ["pi", "omp"],
+        "provider": PROXY_PROVIDER_ID,
+    }))
+    return 0
+
+
+def run_systemctl(*args):
+    return subprocess.run(
+        ["systemctl", "--user", *args],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def proxy_install():
+    ensure_proxy_config()
+    if not PROXY_BINARY.is_file():
+        candidates = [
+            Path(os.environ.get("CLIPROXYAPI_BINARY", "")).expanduser(),
+            Path("/tmp/cliproxy_test/cli-proxy-api"),
+        ]
+        source = next((path for path in candidates if str(path) and path.is_file()), None)
+        if source is None:
+            print(json.dumps({"status": "error", "error": "CLIProxyAPI binary not found"}))
+            return 1
+        PROXY_BINARY.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix=".cli-proxy-api.", dir=PROXY_BINARY.parent)
+        os.close(fd)
+        try:
+            shutil.copy2(source, temp_name)
+            os.chmod(temp_name, 0o755)
+            os.replace(temp_name, PROXY_BINARY)
+        finally:
+            Path(temp_name).unlink(missing_ok=True)
+
+    systemd_dir = Path(__file__).resolve().parent.parent / "systemd"
+    unit_targets = [
+        (systemd_dir / PROXY_SERVICE_NAME, PROXY_SERVICE_FILE),
+        (systemd_dir / PROXY_WATCHDOG_SERVICE_NAME, PROXY_WATCHDOG_SERVICE_FILE),
+        (systemd_dir / PROXY_WATCHDOG_TIMER_NAME, PROXY_WATCHDOG_TIMER_FILE),
+    ]
+    for source, target in unit_targets:
+        if not source.is_file():
+            print(json.dumps({"status": "error", "error": f"Missing service template: {source}"}))
+            return 1
+        atomic_write(target, source.read_text(encoding="utf-8"), 0o644)
+
+    reload_result = run_systemctl("daemon-reload")
+    if reload_result.returncode != 0:
+        print(json.dumps({"status": "error", "error": reload_result.stderr.strip()}))
+        return 1
+    enable_result = run_systemctl("enable", PROXY_SERVICE_NAME, PROXY_WATCHDOG_TIMER_NAME)
+    if enable_result.returncode != 0:
+        print(json.dumps({"status": "error", "error": enable_result.stderr.strip()}))
+        return 1
+    run_systemctl("start", PROXY_WATCHDOG_TIMER_NAME)
+    return proxy_configure_clients()
+
+
+def proxy_is_active():
+    return run_systemctl("is-active", "--quiet", PROXY_SERVICE_NAME).returncode == 0
+
+
+def proxy_models_ready():
+    try:
+        request = urllib.request.Request(
+            f"{PROXY_BASE_URL}/models",
+            headers={"Authorization": f"Bearer {ensure_proxy_key()}"},
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            if not 200 <= response.status < 300:
+                return False
+            payload = json.loads(response.read().decode("utf-8"))
+            model_ids = {str(item.get("id") or "") for item in payload.get("data", [])}
+            return all(model["id"] in model_ids for model in PROXY_MODELS)
+    except Exception:
+        return False
+
+
+def proxy_health():
+    return proxy_is_active() and proxy_models_ready()
+
+
+def proxy_wait_ready():
+    for _ in range(40):
+        if proxy_models_ready():
+            print(json.dumps({"status": "ready"}))
+            return 0
+        time.sleep(0.25)
+    print(json.dumps({"status": "error", "error": "Proxy model catalog did not become ready"}))
+    return 1
+
+
+def proxy_start():
+    if not PROXY_BINARY.is_file() or not PROXY_SERVICE_FILE.is_file():
+        if proxy_install() != 0:
+            return 1
+    if proxy_sync_auth() != 0:
+        return 1
+    proxy_configure_pi()
+    proxy_configure_omp()
+    run_systemctl("enable", PROXY_SERVICE_NAME)
+    result = run_systemctl("start", PROXY_SERVICE_NAME)
+    if result.returncode != 0:
+        print(json.dumps({"status": "error", "error": result.stderr.strip()}))
+        return 1
+    for _ in range(20):
+        if proxy_health():
+            print(json.dumps({"status": "running", "endpoint": PROXY_BASE_URL}))
+            return 0
+        time.sleep(0.25)
+    print(json.dumps({"status": "error", "error": "Proxy started but health check failed"}))
+    return 1
+
+
+def proxy_stop():
+    result = run_systemctl("stop", PROXY_SERVICE_NAME)
+    if result.returncode != 0:
+        print(json.dumps({"status": "error", "error": result.stderr.strip()}))
+        return 1
+    print(json.dumps({"status": "stopped"}))
+    return 0
+
+
+def proxy_status():
+    auth_count = len(list(AUTH_DIR.glob("antigravity-*.json"))) if AUTH_DIR.is_dir() else 0
+    active = proxy_is_active()
+    state = {
+        "status": "running" if active else "stopped",
+        "installed": PROXY_BINARY.is_file() and PROXY_SERVICE_FILE.is_file(),
+        "active": active,
+        "healthy": proxy_health() if active else False,
+        "endpoint": PROXY_BASE_URL,
+        "accounts": auth_count,
+        "provider": PROXY_PROVIDER_ID,
+        "piCommand": f"pi --model {PROXY_PROVIDER_ID}/gemini-3.7-flash-high",
+        "ompCommand": f"omp --model {PROXY_PROVIDER_ID}/gemini-3.7-flash-high",
+    }
+    print(json.dumps(state))
+    return 0
+
+
+def proxy_watchdog():
+    """Restart once for new authentication failures, then notify if they persist."""
+    ensure_proxy_layout()
+    now_ts = int(time.time())
+    state = {"last_check": now_ts - 600, "last_recovery": 0, "last_category": "", "notified": False}
+    if PROXY_WATCHDOG_STATE_FILE.is_file():
+        try:
+            state.update(json.loads(PROXY_WATCHDOG_STATE_FILE.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+
+    since_ts = max(0, int(state.get("last_check") or now_ts - 600))
+    logs = subprocess.run(
+        [
+            "journalctl", "--user", "-u", PROXY_SERVICE_NAME,
+            "--since", f"@{since_ts}", "--no-pager", "-o", "cat",
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).stdout.lower()
+
+    categories = [
+        ("auth_unavailable", ["auth_unavailable", "no auth available"]),
+        ("invalid_refresh", ["invalid_grant", "invalid refresh token", "refresh token is required"]),
+        ("upstream_unauthorized", ["upstream returned 401", "upstream status 401"]),
+    ]
+    category = next((name for name, needles in categories if any(needle in logs for needle in needles)), "")
+    state["last_check"] = now_ts
+
+    if not category:
+        atomic_write(PROXY_WATCHDOG_STATE_FILE, json.dumps(state, indent=2) + "\n", 0o600)
+        return 0
+
+    last_recovery = int(state.get("last_recovery") or 0)
+    if category != state.get("last_category") or (now_ts - last_recovery) >= 3600:
+        result = run_systemctl("restart", PROXY_SERVICE_NAME)
+        state.update({
+            "last_recovery": now_ts,
+            "last_category": category,
+            "notified": False,
+        })
+        if result.returncode == 0:
+            send_notification("Antigravity Proxy", "检测到认证故障，已自动重启一次")
+        else:
+            send_notification("Antigravity Proxy", "认证故障自动恢复失败，请检查服务")
+    elif not state.get("notified"):
+        send_notification("Antigravity Proxy", "认证故障仍然存在，需要重新登录账号")
+        state["notified"] = True
+
+    atomic_write(PROXY_WATCHDOG_STATE_FILE, json.dumps(state, indent=2) + "\n", 0o600)
+    return 0
+
+
+def proxy_copy_client(client):
+    commands = {
+        "pi": f"pi --model {PROXY_PROVIDER_ID}/gemini-3.7-flash-high",
+        "omp": f"omp --model {PROXY_PROVIDER_ID}/gemini-3.7-flash-high",
+    }
+    command = commands.get(client)
+    if not command:
+        print(json.dumps({"status": "error", "error": "Client must be pi or omp"}))
+        return 1
+    if not copy_to_clipboard(command):
+        print(json.dumps({"status": "error", "error": "Clipboard command failed"}))
+        return 1
+    print(json.dumps({"status": "copied", "client": client}))
+    return 0
 
 
 def copy_to_clipboard(text):
@@ -132,64 +697,30 @@ def get_free_port():
     return port
 
 
-def refresh_access_token(acc_data, account_file=None):
-    """Ensure access_token is valid; refresh using refresh_token if expired or close to expiring."""
-    token_info = acc_data.get("token") or {}
-    refresh_tok = token_info.get("refresh_token")
-    if not refresh_tok:
-        return token_info.get("access_token")
+def credential_path(account_id):
+    safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", str(account_id or ""))
+    return AUTH_DIR / f"antigravity-{safe_id}.json"
 
-    now_ts = int(time.time())
-    expiry_ts = int(token_info.get("expiry_timestamp") or 0)
 
-    # Refresh if within 3 minutes of expiry
-    if token_info.get("access_token") and expiry_ts > (now_ts + 180):
-        return token_info.get("access_token")
-
-    post_data = urllib.parse.urlencode({
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "refresh_token": refresh_tok,
-        "grant_type": "refresh_token"
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        TOKEN_URL,
-        data=post_data,
-        headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Antigravity/1.0.0 (Linux)"},
-        method="POST"
-    )
-
+def load_credential(account_id):
+    """Read the canonical credential without refreshing or rewriting it."""
+    path = credential_path(account_id)
+    if not path.is_file():
+        return {}
     try:
-        with urllib.request.urlopen(req, timeout=12) as resp:
-            t_res = json.loads(resp.read().decode("utf-8"))
-            new_access = t_res.get("access_token")
-            expires_in = int(t_res.get("expires_in", 3599))
-            if new_access:
-                token_info["access_token"] = new_access
-                token_info["expires_in"] = expires_in
-                token_info["expiry_timestamp"] = now_ts + expires_in
-                acc_data["token"] = token_info
-                if account_file and Path(account_file).is_file():
-                    try:
-                        Path(account_file).write_text(json.dumps(acc_data, indent=2) + "\n", encoding="utf-8")
-                    except Exception:
-                        pass
-                return new_access
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        pass
-
-    return token_info.get("access_token")
+        return {}
 
 
 def fetch_account_quotas(acc_data, account_file=None):
     """Fetch live quotas from Google Cloud Code API for an account and update account JSON."""
-    access_token = refresh_access_token(acc_data, account_file)
+    credential = load_credential(acc_data.get("id"))
+    access_token = credential.get("access_token")
     if not access_token:
         return False
 
-    token_info = acc_data.get("token") or {}
-    project_id = token_info.get("project_id") or "aicode-consumers"
+    project_id = credential.get("project_id") or acc_data.get("project_id") or "aicode-consumers"
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
@@ -278,7 +809,7 @@ def fetch_account_quotas(acc_data, account_file=None):
 
     if account_file and Path(account_file).is_file():
         try:
-            Path(account_file).write_text(json.dumps(acc_data, indent=2) + "\n", encoding="utf-8")
+            atomic_write(account_file, json.dumps(acc_data, indent=2) + "\n", 0o600)
         except Exception:
             pass
 
@@ -541,37 +1072,53 @@ def oauth_start():
         account_id = str(uuid.uuid4())
 
     account_file = ACCOUNTS_DIR / f"{account_id}.json"
+    auth_file = credential_path(account_id)
     now_ts = int(time.time())
+    existing_account = {}
+    existing_credential = {}
+    if account_file.is_file():
+        try:
+            existing_account = json.loads(account_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    if auth_file.is_file():
+        try:
+            existing_credential = json.loads(auth_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    credential = {
+        "type": "antigravity",
+        "email": user_email,
+        "access_token": access_token,
+        "refresh_token": refresh_token or existing_credential.get("refresh_token") or "",
+        "expires_in": expires_in,
+        "project_id": existing_credential.get("project_id") or existing_account.get("project_id") or "aicode-consumers",
+        "token_type": "Bearer",
+        "timestamp": now_ts * 1000,
+        "expired": datetime.fromtimestamp(expiry_ts, timezone.utc).isoformat(),
+        "disabled": False,
+    }
+    atomic_write(auth_file, json.dumps(credential, indent=2) + "\n", 0o600)
 
     account_obj = {
         "id": account_id,
         "email": user_email,
         "name": user_name,
-        "token": {
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "expires_in": expires_in,
-            "expiry_timestamp": expiry_ts,
-            "token_type": "Bearer",
-            "email": user_email,
-            "project_id": "aicode-consumers",
-            "oauth_client_key": "antigravity_enterprise",
-            "is_gcp_tos": False,
-            "id_token": token_res.get("id_token")
-        },
-        "quota": {
+        "project_id": credential["project_id"],
+        "quota": existing_account.get("quota") or {
             "models": [],
             "last_updated": 0,
             "subscription_tier": "Google AI Pro"
         },
         "disabled": False,
-        "created_at": now_ts,
+        "created_at": int(existing_account.get("created_at") or now_ts),
         "last_used": now_ts
     }
 
     # Fetch initial quotas
-    fetch_account_quotas(account_obj)
-    account_file.write_text(json.dumps(account_obj, indent=2) + "\n", encoding="utf-8")
+    fetch_account_quotas(account_obj, account_file)
+    atomic_write(account_file, json.dumps(account_obj, indent=2) + "\n", 0o600)
 
     acc_list = index_data.get("accounts", [])
     found = False
@@ -595,7 +1142,7 @@ def oauth_start():
 
     index_data["accounts"] = acc_list
     index_data["current_account_id"] = account_id
-    ACCOUNTS_INDEX.write_text(json.dumps(index_data, indent=2) + "\n", encoding="utf-8")
+    atomic_write(ACCOUNTS_INDEX, json.dumps(index_data, indent=2) + "\n", 0o600)
 
     send_notification("Antigravity OAuth", f"账号 {user_email} 授权成功！已激活")
     trigger_collector_update()
@@ -613,7 +1160,13 @@ def oauth_start():
 def main():
     ensure_storage_migrated()
     if len(sys.argv) < 2:
-        print("Usage: omarchy-antigravity-ctl [switch <id> | oauth-start | oauth-cancel | refresh [id]]")
+        print(
+            "Usage: omarchy-antigravity-ctl "
+            "[switch <id> | oauth-start | oauth-cancel | refresh [id] | "
+            "proxy-install | proxy-start | proxy-stop | proxy-status | "
+            "proxy-sync-auth | proxy-configure-clients | proxy-key | proxy-copy <pi|omp> | "
+            "proxy-watchdog | credentials-migrate]"
+        )
         return 1
 
     cmd = sys.argv[1]
@@ -641,6 +1194,32 @@ def main():
         trigger_collector_update()
         print(json.dumps({"status": "refreshed"}))
         return 0
+    elif cmd == "proxy-install":
+        return proxy_install()
+    elif cmd == "proxy-start":
+        return proxy_start()
+    elif cmd == "proxy-stop":
+        return proxy_stop()
+    elif cmd == "proxy-status":
+        return proxy_status()
+    elif cmd == "proxy-wait-ready":
+        return proxy_wait_ready()
+    elif cmd == "proxy-sync-auth":
+        return proxy_sync_auth()
+    elif cmd == "proxy-configure-clients":
+        return proxy_configure_clients()
+    elif cmd == "proxy-key":
+        print(ensure_proxy_key())
+        return 0
+    elif cmd == "proxy-copy":
+        if len(sys.argv) < 3:
+            print(json.dumps({"status": "error", "error": "Missing client: pi or omp"}))
+            return 1
+        return proxy_copy_client(sys.argv[2])
+    elif cmd == "proxy-watchdog":
+        return proxy_watchdog()
+    elif cmd == "credentials-migrate":
+        return credentials_migrate()
     else:
         print(f"Unknown command: {cmd}")
         return 1

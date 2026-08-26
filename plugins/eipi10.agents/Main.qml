@@ -323,14 +323,102 @@ Item {
     }
   }
 
-  readonly property var globalProvider: {
+  // Unified cross-agent view for the shared sections (tokens by day, tokens
+  // & cost by model): every enabled agent's numbers summed into one record,
+  // so a subscription added anywhere shows up in the totals on every tab.
+  readonly property var aggregateProvider: {
     var pList = enabledProviders
-    for (var i = 0; i < pList.length; i++) {
-      if (pList[i].providerId === "codex" || pList[i].providerId === "antigravity") {
-        return pList[i]
+    if (pList.length === 0) return null
+    var dayMap = {}
+    var modelMap = {}
+    var todayModelMap = {}
+    var todayByModelMap = {}
+    var dateSet = {}
+    var todayPrompts = 0, todaySessions = 0, todayTotalTokens = 0, todayTotalCost = 0
+    var totalPrompts = 0, totalSessions = 0
+    var hasStats = false
+
+    function mergeModelMap(dst, src) {
+      for (var model in src) {
+        var from = src[model] || {}
+        var to = dst[model]
+        if (!to) to = dst[model] = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 }
+        to.inputTokens += numberValue(from.inputTokens)
+        to.outputTokens += numberValue(from.outputTokens)
+        to.cacheReadInputTokens += numberValue(from.cacheReadInputTokens)
+        to.cacheCreationInputTokens += numberValue(from.cacheCreationInputTokens)
       }
     }
-    return pList.length > 0 ? pList[0] : null
+
+    for (var i = 0; i < pList.length; i++) {
+      var p = pList[i]
+      todayPrompts += numberValue(p.todayPrompts)
+      todaySessions += numberValue(p.todaySessions)
+      todayTotalTokens += numberValue(p.todayTotalTokens)
+      todayTotalCost += numberValue(p.todayTotalCost)
+      totalPrompts += numberValue(p.totalPrompts)
+      totalSessions += numberValue(p.totalSessions)
+
+      var days = Array.isArray(p.recentDays) ? p.recentDays : []
+      for (var d = 0; d < days.length; d++) {
+        var row = days[d]
+        if (!row || !row.date) continue
+        var cell = dayMap[row.date]
+        if (!cell) cell = dayMap[row.date] = { date: String(row.date), messageCount: 0 }
+        cell.messageCount += numberValue(row.messageCount)
+      }
+
+      mergeModelMap(modelMap, p.modelUsage || {})
+      mergeModelMap(todayModelMap, p.todayModelUsage || {})
+
+      var byModel = p.todayTokensByModel || {}
+      for (var model in byModel) todayByModelMap[model] = (todayByModelMap[model] || 0) + numberValue(byModel[model])
+
+      var activeDates = Array.isArray(p.activeDates) ? p.activeDates : []
+      for (var a = 0; a < activeDates.length; a++) dateSet[String(activeDates[a])] = true
+
+      if (p.hasLocalStats !== false) hasStats = true
+    }
+
+    var recentDays = []
+    for (var dateKey in dayMap) recentDays.push(dayMap[dateKey])
+    recentDays.sort(function(a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0) })
+    if (recentDays.length > 7) recentDays = recentDays.slice(-7)
+
+    var activeDates = []
+    for (var dateKey in dateSet) activeDates.push(dateKey)
+    activeDates.sort()
+
+    return {
+      providerId: "aggregate",
+      providerName: "All Agents",
+      ready: true,
+      usageStatusText: "",
+      authHelpText: "",
+      limits: [],
+      tierLabel: "",
+      balance: null,
+      currentAccountId: "",
+      currentAccountEmail: "",
+      accounts: [],
+      todayPrompts: todayPrompts,
+      todaySessions: todaySessions,
+      todayTotalTokens: todayTotalTokens,
+      todayTotalCost: todayTotalCost,
+      todayTokensByModel: todayByModelMap,
+      todayModelUsage: todayModelMap,
+      recentDays: recentDays,
+      totalPrompts: totalPrompts,
+      totalSessions: totalSessions,
+      activeDays: activeDates.length,
+      activeDates: activeDates,
+      modelUsage: modelMap,
+      hasLocalStats: hasStats,
+      hasPromptStats: true,
+      syncEnabled: false,
+      syncDeviceCount: 0,
+      syncUpdatedAt: ""
+    }
   }
 
   function setting(name, fallback) {

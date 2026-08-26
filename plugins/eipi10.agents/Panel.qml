@@ -47,6 +47,9 @@ Panel {
   property string oauthStatus: "idle" // "idle", "listening", "success", "error"
   property string oauthMessage: ""
   property bool accountSwitching: false
+  property var proxyState: ({})
+  property bool proxyBusy: false
+  property string proxyMessage: ""
 
   Process {
     id: switchProc
@@ -98,6 +101,30 @@ Panel {
   Process {
     id: copyProc
     running: false
+  }
+
+  Process {
+    id: proxyStatusProc
+    running: false
+    command: [root.home + "/.config/omarchy/plugins/eipi10.agents/bin/omarchy-antigravity-ctl", "proxy-status"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.parseProxyStatus(text)
+    }
+  }
+
+  Process {
+    id: proxyControlProc
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.parseProxyControl(text)
+    }
+    onExited: function(exitCode) {
+      root.proxyBusy = false
+      if (exitCode !== 0 && root.proxyMessage === "") root.proxyMessage = "代理操作失败"
+      root.refreshProxyStatus()
+    }
   }
 
   function switchAccount(accId) {
@@ -153,6 +180,55 @@ Panel {
         } catch (e) {}
       }
     }
+  }
+
+  function lastJsonLine(txt) {
+    var lines = String(txt || "").trim().split("\n")
+    for (var i = lines.length - 1; i >= 0; i--) {
+      var line = lines[i].trim()
+      if (line.charAt(0) !== "{" || line.slice(-1) !== "}") continue
+      try { return JSON.parse(line) } catch (e) {}
+    }
+    return null
+  }
+
+  function parseProxyStatus(txt) {
+    var state = lastJsonLine(txt)
+    if (state) proxyState = state
+  }
+
+  function parseProxyControl(txt) {
+    var result = lastJsonLine(txt)
+    if (!result) return
+    if (result.status === "error") {
+      proxyMessage = "操作失败：" + String(result.error || "未知错误")
+    } else if (result.status === "copied") {
+      proxyMessage = String(result.client || "").toUpperCase() + " 启动命令已复制"
+    } else if (result.status === "running") {
+      proxyMessage = "流式代理已启动"
+    } else if (result.status === "stopped") {
+      proxyMessage = "流式代理已停止"
+    }
+  }
+
+  function refreshProxyStatus() {
+    if (!proxyStatusProc.running) proxyStatusProc.running = true
+  }
+
+  function runProxyAction(action) {
+    if (proxyBusy || proxyControlProc.running) return
+    proxyBusy = true
+    proxyMessage = ""
+    var command = action === "start"
+      ? "proxy-start"
+      : (action === "stop" ? "proxy-stop" : "proxy-copy")
+    proxyControlProc.command = [
+      root.home + "/.config/omarchy/plugins/eipi10.agents/bin/omarchy-antigravity-ctl",
+      command
+    ]
+    if (action === "copy-pi") proxyControlProc.command.push("pi")
+    else if (action === "copy-omp") proxyControlProc.command.push("omp")
+    proxyControlProc.running = true
   }
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
@@ -243,12 +319,16 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  onProviderIndexChanged: if (panelFlick) panelFlick.contentY = 0
+  onProviderIndexChanged: {
+    if (panelFlick) panelFlick.contentY = 0
+    if (provider && provider.providerId === "antigravity") refreshProxyStatus()
+  }
   onOpenedChanged: if (opened) {
     cursorActive = false
     nowMs = Date.now()
     if (panelFlick) panelFlick.contentY = 0
     usage.refreshAll(false)
+    if (provider && provider.providerId === "antigravity") refreshProxyStatus()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -262,6 +342,13 @@ Panel {
     running: root.opened
     repeat: true
     onTriggered: root.nowMs = Date.now()
+  }
+
+  Timer {
+    interval: 5000
+    running: root.opened && !!root.provider && root.provider.providerId === "antigravity"
+    repeat: true
+    onTriggered: root.refreshProxyStatus()
   }
 
   IpcHandler {
@@ -349,7 +436,6 @@ Panel {
           // ---------- Hero: provider mark · name · plan · today cost ----------
           Comp.HeroSection {
             provider: root.provider
-            globalProvider: usage.globalProvider || root.provider
             customRates: usage.customRates
             foreground: root.foreground
             dim: root.dim
@@ -390,6 +476,25 @@ Panel {
             fontFamily: root.fontFamily
             onCopyLinkRequested: function() { root.copyOAuthLink() }
             onCancelRequested: function() { root.cancelOAuth() }
+          }
+
+          // ---------- Local streaming proxy for pi / omp ----------
+          PanelSeparator {
+            visible: proxySec.visible
+            foreground: root.foreground
+          }
+
+          Comp.ProxySection {
+            id: proxySec
+            visible: !!root.provider && root.provider.providerId === "antigravity"
+            stateData: root.proxyState
+            busy: root.proxyBusy
+            message: root.proxyMessage
+            foreground: root.foreground
+            urgent: root.urgent
+            dim: root.dim
+            fontFamily: root.fontFamily
+            onActionRequested: function(action) { root.runProxyAction(action) }
           }
 
           // ---------- Status Banner ----------
@@ -435,7 +540,7 @@ Panel {
 
           Comp.DailyUsageSection {
             id: dailySec
-            provider: usage.globalProvider || root.provider
+            provider: usage.aggregateProvider || root.provider
             customRates: usage.customRates
             nowMs: root.nowMs
             foreground: root.foreground
@@ -453,7 +558,7 @@ Panel {
 
           Comp.ModelUsageSection {
             id: modelSec
-            provider: usage.globalProvider || root.provider
+            provider: usage.aggregateProvider || root.provider
             customRates: usage.customRates
             foreground: root.foreground
             dim: root.dim

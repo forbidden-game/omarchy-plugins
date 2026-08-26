@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+import os
+import sys
+import re
+import json
+import subprocess
+
+CONF_DIR = os.path.expanduser("~/.config/XiezhaoPan")
+CONF_FILE = os.path.join(CONF_DIR, "qwen-asr-qt.conf")
+BINDINGS_FILE = os.path.expanduser("~/.config/hypr/bindings.lua")
+
+def get_shortcut():
+    if os.path.exists(BINDINGS_FILE):
+        try:
+            with open(BINDINGS_FILE, "r", encoding="utf-8") as f:
+                content = f.read()
+            # Match o.bind("...", "Start recording (Qwen ASR...
+            m = re.search(r'o\.bind\(\s*["\']([^"\']+)["\']\s*,\s*["\'][^"\']*Start recording \(Qwen ASR[^"\']*["\']', content, re.IGNORECASE)
+            if not m:
+                m = re.search(r'o\.bind\(\s*["\']([^"\']+)["\']\s*,\s*["\'][^"\']*qwen-asr start[^"\']*["\']', content, re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+        except Exception as e:
+            pass
+
+    # Fallback to conf file
+    if os.path.exists(CONF_FILE):
+        try:
+            with open(CONF_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip().startswith("shortcut="):
+                        val = line.split("=", 1)[1].strip()
+                        if val:
+                            return val
+        except Exception:
+            pass
+
+    return "F9"
+
+def set_shortcut(new_key):
+    new_key = new_key.strip()
+    if not new_key:
+        return False, "快捷键不能为空"
+
+    # 1. Update bindings.lua
+    os.makedirs(os.path.dirname(BINDINGS_FILE), exist_ok=True)
+    if os.path.exists(BINDINGS_FILE):
+        with open(BINDINGS_FILE, "r", encoding="utf-8") as f:
+            content = f.read()
+    else:
+        content = "-- Hyprland personal bindings\n"
+
+    primary_block = (
+        f'-- Qwen ASR push-to-talk (hold to record, release to transcribe).\n'
+        f'o.bind("{new_key}", "Start recording (Qwen ASR push-to-talk)", "omarchy-shell qwen-asr start")\n'
+        f'o.bind("{new_key}", "Stop recording (Qwen ASR push-to-talk)", "omarchy-shell qwen-asr stop", {{ release = true }})'
+    )
+
+    # Regex for standard qwen block
+    qwen_block_regex = r'-- Qwen ASR push-to-talk[^\n]*\n\s*o\.bind\([^\n]+qwen-asr start[^\n]*\)\n\s*o\.bind\([^\n]+qwen-asr stop[^\n]*\)'
+    general_qwen_regex = r'o\.bind\(\s*["\'][^"\']+["\']\s*,\s*["\'][^"\']*Start recording \(Qwen ASR[^\n]*\)\n\s*o\.bind\(\s*["\'][^"\']+["\']\s*,\s*["\'][^"\']*Stop recording \(Qwen ASR[^\n]*\)'
+
+    if re.search(qwen_block_regex, content):
+        new_content = re.sub(qwen_block_regex, primary_block, content, count=1)
+    elif re.search(general_qwen_regex, content):
+        new_content = re.sub(general_qwen_regex, primary_block, content, count=1)
+    else:
+        new_content = content.rstrip() + "\n\n" + primary_block + "\n"
+
+    try:
+        tmp_file = BINDINGS_FILE + ".tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        os.replace(tmp_file, BINDINGS_FILE)
+    except Exception as e:
+        return False, f"写入 bindings.lua 失败: {e}"
+
+    # 2. Update config file
+    try:
+        os.makedirs(CONF_DIR, exist_ok=True)
+        conf_lines = []
+        in_asr = False
+        found_key = False
+        if os.path.exists(CONF_FILE):
+            with open(CONF_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped == "[asr]":
+                        in_asr = True
+                        conf_lines.append(line)
+                    elif in_asr and stripped.startswith("shortcut="):
+                        conf_lines.append(f"shortcut={new_key}\n")
+                        found_key = True
+                    elif in_asr and stripped.startswith("["):
+                        if not found_key:
+                            conf_lines.append(f"shortcut={new_key}\n")
+                            found_key = True
+                        in_asr = False
+                        conf_lines.append(line)
+                    else:
+                        conf_lines.append(line)
+        if not found_key:
+            if in_asr:
+                conf_lines.append(f"shortcut={new_key}\n")
+            else:
+                conf_lines.append(f"\n[asr]\nshortcut={new_key}\n")
+
+        with open(CONF_FILE + ".tmp", "w", encoding="utf-8") as f:
+            f.writelines(conf_lines)
+        os.replace(CONF_FILE + ".tmp", CONF_FILE)
+        os.chmod(CONF_FILE, 0o600)
+    except Exception as e:
+        pass
+
+    # 3. Reload hyprland
+    reload_res = subprocess.run(["hyprctl", "reload"], capture_output=True, text=True)
+    return True, new_key
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: qwen-asr-ctl [get-shortcut|set-shortcut <key>]")
+        sys.exit(1)
+
+    cmd = sys.argv[1]
+    if cmd == "get-shortcut":
+        shortcut = get_shortcut()
+        print(shortcut)
+    elif cmd == "set-shortcut":
+        if len(sys.argv) < 3:
+            print("Error: missing shortcut argument", file=sys.stderr)
+            sys.exit(1)
+        key = sys.argv[2]
+        ok, msg = set_shortcut(key)
+        if ok:
+            print(json.dumps({"status": "ok", "shortcut": msg}))
+        else:
+            print(json.dumps({"status": "error", "message": msg}), file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(f"Unknown command: {cmd}", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

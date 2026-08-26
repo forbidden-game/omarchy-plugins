@@ -10,7 +10,7 @@ All plugins are designed with strict performance budgets, zero-slop UI aesthetic
 
 | Plugin ID | Name | Category | Description | Source |
 | :--- | :--- | :--- | :--- | :--- |
-| **`eipi10.agents`** | **My Agents** | `AI` | Comprehensive usage, rate limits, pace tracking, and KV cache stats for Claude Code, Codex, Antigravity, and Fireworks. | [`plugins/eipi10.agents/`](plugins/eipi10.agents/) |
+| **`eipi10.agents`** | **My Agents** | `AI` | Comprehensive usage, rate limits, pace tracking, and KV cache stats for Claude Code, Codex, Antigravity, Fireworks, and the GLM Coding Plan. | [`plugins/eipi10.agents/`](plugins/eipi10.agents/) |
 | **`eipi10.cpu-ram`** | **CPU & RAM** | `System` | Real-time CPU, RAM, Swap, CPU temperature meters with per-core usage & top resource-consuming processes popup. | [`plugins/eipi10.cpu-ram/`](plugins/eipi10.cpu-ram/) |
 | **`eipi10.battery-info`** | **Battery Info** | `System` | Live battery charging/discharging wattage, battery state indicators, and daily/weekly/monthly energy consumption metrics. | [`plugins/eipi10.battery-info/`](plugins/eipi10.battery-info/) |
 | **`qwen-asr`** | **Qwen ASR** | `Utility` | Push-to-talk Qwen Audio 3.0 speech recognition with acoustic level visualizer, global `F9` keybinding, and clipboard output. | [`plugins/qwen-asr/`](plugins/qwen-asr/) |
@@ -23,10 +23,14 @@ All plugins are designed with strict performance budgets, zero-slop UI aesthetic
 
 ### 1. Clone the repository
 
+On this machine the repository lives inside the `omarchy_plugins` workspace:
+
 ```bash
-git clone https://github.com/forbidden-game/omarchy-plugins.git ~/work/projects/omarchy-plugins
-cd ~/work/projects/omarchy-plugins
+git clone https://github.com/forbidden-game/omarchy-plugins.git ~/work/projects/omarchy_plugins/omarchy-plugins
+cd ~/work/projects/omarchy_plugins/omarchy-plugins
 ```
+
+Anywhere else works too — `install.sh` resolves its own location.
 
 ### 2. Install all plugins (via Symlink)
 

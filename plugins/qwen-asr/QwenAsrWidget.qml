@@ -56,6 +56,131 @@ Panel {
   readonly property int meterMaxHeight: Math.max(10, Math.round(root.barSize * 0.55))
   readonly property int meterWidth: controller.barCount * (meterBarWidth + meterBarGap) - meterBarGap
 
+  // Shortcut capture state
+  property bool capturingShortcut: false
+  property string detectedKey: ""
+  property string detectedDisplayName: ""
+
+  function startCapturing() {
+    root.capturingShortcut = true
+    root.detectedKey = ""
+    root.detectedDisplayName = ""
+    Qt.callLater(function() {
+      if (captureFocusItem) captureFocusItem.forceActiveFocus()
+    })
+  }
+
+  function stopCapturing() {
+    root.capturingShortcut = false
+    root.detectedKey = ""
+    root.detectedDisplayName = ""
+  }
+
+  function applyShortcut(key) {
+    controller.setShortcut(key, function(ok) {
+      if (ok) root.stopCapturing()
+    })
+  }
+
+  function keyEventToHyprland(event) {
+    var key = event.key
+    var modifiers = event.modifiers
+
+    if (key === Qt.Key_Control || key === Qt.Key_Shift || key === Qt.Key_Alt ||
+        key === Qt.Key_Meta || key === Qt.Key_Super_L || key === Qt.Key_Super_R ||
+        key === Qt.Key_AltGr) {
+      return null
+    }
+
+    var parts = []
+    if (modifiers & Qt.MetaModifier) parts.push("SUPER")
+    if (modifiers & Qt.ControlModifier) parts.push("CTRL")
+    if (modifiers & Qt.AltModifier) parts.push("ALT")
+    if (modifiers & Qt.ShiftModifier) parts.push("SHIFT")
+
+    var keyName = ""
+    if (key >= Qt.Key_F1 && key <= Qt.Key_F35) {
+      keyName = "F" + (key - Qt.Key_F1 + 1)
+    } else if (key >= Qt.Key_A && key <= Qt.Key_Z) {
+      keyName = String.fromCharCode(key)
+    } else if (key >= Qt.Key_0 && key <= Qt.Key_9) {
+      keyName = String.fromCharCode(key)
+    } else {
+      switch (key) {
+        case Qt.Key_Space: keyName = "SPACE"; break
+        case Qt.Key_Return: case Qt.Key_Enter: keyName = "Return"; break
+        case Qt.Key_Tab: keyName = "Tab"; break
+        case Qt.Key_Backtab: keyName = "Backtab"; break
+        case Qt.Key_Backspace: keyName = "BackSpace"; break
+        case Qt.Key_CapsLock: keyName = "Caps_Lock"; break
+        case Qt.Key_ScrollLock: keyName = "Scroll_Lock"; break
+        case Qt.Key_NumLock: keyName = "Num_Lock"; break
+        case Qt.Key_Print: keyName = "Print"; break
+        case Qt.Key_Pause: keyName = "Pause"; break
+        case Qt.Key_Insert: keyName = "Insert"; break
+        case Qt.Key_Delete: keyName = "Delete"; break
+        case Qt.Key_Home: keyName = "Home"; break
+        case Qt.Key_End: keyName = "End"; break
+        case Qt.Key_PageUp: keyName = "Prior"; break
+        case Qt.Key_PageDown: keyName = "Next"; break
+        case Qt.Key_Up: keyName = "Up"; break
+        case Qt.Key_Down: keyName = "Down"; break
+        case Qt.Key_Left: keyName = "Left"; break
+        case Qt.Key_Right: keyName = "Right"; break
+        case Qt.Key_QuoteLeft: case Qt.Key_AsciiTilde: keyName = "grave"; break
+        case Qt.Key_Minus: keyName = "minus"; break
+        case Qt.Key_Equal: keyName = "equal"; break
+        case Qt.Key_BracketLeft: keyName = "bracketleft"; break
+        case Qt.Key_BracketRight: keyName = "bracketright"; break
+        case Qt.Key_Backslash: keyName = "backslash"; break
+        case Qt.Key_Semicolon: keyName = "semicolon"; break
+        case Qt.Key_Apostrophe: keyName = "apostrophe"; break
+        case Qt.Key_Comma: keyName = "comma"; break
+        case Qt.Key_Period: keyName = "period"; break
+        case Qt.Key_Slash: keyName = "slash"; break
+        default:
+          if (event.text && event.text.length === 1 && event.text.charCodeAt(0) > 32) {
+            keyName = event.text.toUpperCase()
+          }
+          break
+      }
+    }
+
+    if (!keyName) return null
+
+    var res = []
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i] !== keyName) res.push(parts[i])
+    }
+    res.push(keyName)
+    return res.join(" + ")
+  }
+
+  function mouseEventToHyprland(mouse) {
+    var btn = mouse.button
+    var modifiers = mouse.modifiers || 0
+
+    var parts = []
+    if (modifiers & Qt.MetaModifier) parts.push("SUPER")
+    if (modifiers & Qt.ControlModifier) parts.push("CTRL")
+    if (modifiers & Qt.AltModifier) parts.push("ALT")
+    if (modifiers & Qt.ShiftModifier) parts.push("SHIFT")
+
+    var mouseKey = ""
+    if (btn === Qt.BackButton || btn === 8) mouseKey = "mouse:275"
+    else if (btn === Qt.ForwardButton || btn === 16) mouseKey = "mouse:276"
+    else if (btn === Qt.MiddleButton || btn === 4) mouseKey = "mouse:274"
+    else if (btn === Qt.RightButton || btn === 2) mouseKey = "mouse:273"
+    else if (btn === Qt.LeftButton || btn === 1) mouseKey = "mouse:272"
+    else if (btn === Qt.TaskButton || btn === 32) mouseKey = "mouse:277"
+    else if (btn === 64) mouseKey = "mouse:278"
+    else if (btn === 128) mouseKey = "mouse:279"
+    else return null
+
+    parts.push(mouseKey)
+    return parts.join(" + ")
+  }
+
   function openHistoryFile() {
     if (root.bar) root.bar.run("omarchy launch editor " + Util.shellQuote(controller.historyFile))
     else controller.notify("󰈙", "Qwen ASR", "记录文件：" + controller.historyFile, "low")
@@ -180,7 +305,7 @@ Panel {
                 ? (controller.retryAttempt > 0 ? "识别为空，重试 " + controller.retryAttempt + "/3…" : "转写中…")
                 : (root.offline ? "网络不可用 · 右键查看"
                    : (root.hasError ? "上次出错 · 右键查看"
-                      : (controller.apiKeyConfigured ? "按住录音 · 松开上屏 · F9" : "未配置 API Key，点击右键配置")))))
+                      : (controller.apiKeyConfigured ? ("按住录音 · 松开上屏 · " + controller.currentShortcutDisplay) : "未配置 API Key，点击右键配置")))))
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
@@ -195,9 +320,13 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    focusTarget: keyField
-    contentWidth: Style.space(420)
-    contentHeight: Style.space(560)
+    focusTarget: root.capturingShortcut ? captureFocusItem : keyField
+    contentWidth: Style.space(460)
+    contentHeight: root.capturingShortcut ? Style.space(680) : Style.space(630)
+
+    Behavior on contentHeight {
+      NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+    }
 
     Column {
       width: panel.contentWidth - Style.spacing.popupPadding * 2
@@ -218,12 +347,11 @@ Panel {
           anchors.margins: Style.space(8)
           spacing: Style.space(4)
 
-          Row {
+          RowLayout {
             width: parent.width
             spacing: Style.space(8)
 
             Text {
-              anchors.verticalCenter: parent.verticalCenter
               text: root.iconText
               color: (root.recording || root.hasError) ? root.urgent : root.accent
               font.family: root.fontFamily
@@ -231,7 +359,7 @@ Panel {
             }
 
             Column {
-              width: parent.width - Style.space(26)
+              Layout.fillWidth: true
               spacing: 1
 
               Text {
@@ -272,13 +400,13 @@ Panel {
       }
 
       // Feature Toggles Row
-      Row {
+      RowLayout {
         width: parent.width
         spacing: Style.space(8)
 
         // Auto Paste Toggle
         Rectangle {
-          width: (parent.width - Style.space(8)) / 2
+          Layout.fillWidth: true
           height: Style.space(34)
           radius: Style.space(4)
           color: controller.autoPaste ? Style.selectedFillFor(root.accent, root.accent) : "transparent"
@@ -314,7 +442,7 @@ Panel {
 
         // Floating HUD Toggle
         Rectangle {
-          width: (parent.width - Style.space(8)) / 2
+          Layout.fillWidth: true
           height: Style.space(34)
           radius: Style.space(4)
           color: controller.showHud ? Style.selectedFillFor(root.accent, root.accent) : "transparent"
@@ -349,10 +477,216 @@ Panel {
         }
       }
 
+      // Shortcut Settings Card
+      Rectangle {
+        width: parent.width
+        implicitHeight: shortcutCol.implicitHeight + Style.space(16)
+        radius: Style.space(6)
+        color: Style.selectedFillFor(root.foreground, root.accent)
+        border.color: root.capturingShortcut ? root.accent : Color.popups.border
+        border.width: 1
+
+        Column {
+          id: shortcutCol
+          anchors.fill: parent
+          anchors.margins: Style.space(10)
+          spacing: Style.space(10)
+
+          // 1. Header: Icon + Title + Custom Record Button
+          RowLayout {
+            width: parent.width
+            spacing: Style.space(8)
+
+            Text {
+              text: controller.shortcutIcon(controller.currentShortcut)
+              color: root.accent
+              font.family: root.fontFamily
+              font.pixelSize: Style.space(18)
+            }
+
+            Column {
+              Layout.fillWidth: true
+              spacing: 1
+              Text {
+                text: "按住对讲快捷键"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+              }
+              Text {
+                text: "长按录音 · 松开转写 (支持键盘/鼠标侧键)"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Math.max(9, Style.font.body * 0.72)
+              }
+            }
+
+            Button {
+              text: root.capturingShortcut ? "取消" : "自定义录制"
+              bordered: true
+              foreground: root.capturingShortcut ? root.urgent : root.foreground
+              fontFamily: root.fontFamily
+              onClicked: {
+                if (root.capturingShortcut) root.stopCapturing()
+                else root.startCapturing()
+              }
+            }
+          }
+
+          // 2. Interactive Key/Mouse Capture Area (Visible when capturingShortcut is true)
+          Rectangle {
+            visible: root.capturingShortcut
+            width: parent.width
+            height: Style.space(42)
+            radius: Style.space(4)
+            color: Style.selectedFillFor(root.accent, root.accent)
+            border.color: root.accent
+            border.width: 1
+
+            Item {
+              id: captureFocusItem
+              anchors.fill: parent
+              focus: root.capturingShortcut
+
+              Keys.priority: Keys.BeforeItem
+              Keys.onPressed: function(event) {
+                if (!root.capturingShortcut) return
+                if (event.key === Qt.Key_Escape) {
+                  root.stopCapturing()
+                  event.accepted = true
+                  return
+                }
+                var combo = root.keyEventToHyprland(event)
+                if (combo) {
+                  root.detectedKey = combo
+                  root.detectedDisplayName = controller.friendlyShortcutName(combo)
+                  event.accepted = true
+                }
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.AllButtons
+                hoverEnabled: true
+                cursorShape: Qt.CrossCursor
+
+                onPressed: function(mouse) {
+                  if (!root.capturingShortcut) return
+                  var combo = root.mouseEventToHyprland(mouse)
+                  if (combo) {
+                    root.detectedKey = combo
+                    root.detectedDisplayName = controller.friendlyShortcutName(combo)
+                    mouse.accepted = true
+                  }
+                }
+              }
+
+              RowLayout {
+                anchors.fill: parent
+                anchors.margins: Style.space(6)
+                spacing: Style.space(8)
+
+                Text {
+                  text: root.detectedKey !== "" ? "󰄬" : "󰍬"
+                  color: root.detectedKey !== "" ? "#34D399" : root.accent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.space(15)
+                }
+
+                Text {
+                  Layout.fillWidth: true
+                  text: root.detectedKey !== ""
+                    ? ("已捕获: " + root.detectedDisplayName)
+                    : "请按键盘按键或点击鼠标键(支持侧键)..."
+                  color: root.detectedKey !== "" ? root.foreground : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Math.max(10, Style.font.body * 0.8)
+                  font.bold: root.detectedKey !== ""
+                  elide: Text.ElideRight
+                }
+
+                Button {
+                  visible: root.detectedKey !== ""
+                  text: "保存应用"
+                  bordered: true
+                  foreground: root.accent
+                  fontFamily: root.fontFamily
+                  onClicked: {
+                    if (root.detectedKey !== "") {
+                      root.applyShortcut(root.detectedKey)
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // 3. Preset Chips (Clean consistent Omarchy tokens)
+          Flow {
+            width: parent.width
+            spacing: Style.space(6)
+
+            Repeater {
+              model: [
+                { icon: "󰌌", name: "F9 (默认)", key: "F9" },
+                { icon: "󰍽", name: "侧键(后退·275)", key: "mouse:275" },
+                { icon: "󰍽", name: "侧键(前进·276)", key: "mouse:276" },
+                { icon: "󰍽", name: "中键(274)", key: "mouse:274" },
+                { icon: "󰌌", name: "Super+Shift+F9", key: "SUPER + SHIFT + F9" }
+              ]
+
+              delegate: Rectangle {
+                readonly property bool isSelected: controller.currentShortcut === modelData.key
+                height: Style.space(26)
+                width: chipRow.implicitWidth + Style.space(14)
+                radius: Style.space(4)
+                color: isSelected
+                  ? Style.selectedFillFor(root.accent, root.accent)
+                  : (chipHover.containsMouse ? Style.selectedFillFor(root.foreground, root.accent) : "transparent")
+                border.color: isSelected ? root.accent : (chipHover.containsMouse ? root.accent : root.dim)
+                border.width: 1
+
+                MouseArea {
+                  id: chipHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.applyShortcut(modelData.key)
+                }
+
+                Row {
+                  id: chipRow
+                  anchors.centerIn: parent
+                  spacing: Style.space(5)
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: isSelected ? "󰄬" : modelData.icon
+                    color: isSelected ? root.accent : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.space(11)
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: modelData.name
+                    color: isSelected ? root.accent : root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Math.max(9, Style.font.body * 0.76)
+                    font.bold: isSelected
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
       PanelSeparator {}
 
       // Recent Transcripts Header
-      Row {
+      RowLayout {
         width: parent.width
         Text {
           text: "最近转写记录"
@@ -360,7 +694,7 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Math.max(10, Style.font.body * 0.8)
         }
-        Item { Layout.fillWidth: true; width: parent.width - Style.space(120) }
+        Item { Layout.fillWidth: true }
         Text {
           visible: controller.recent.length > 0
           text: "清空历史"
@@ -378,7 +712,7 @@ Panel {
       ListView {
         id: historyList
         width: parent.width
-        height: Math.min(Style.space(220), Math.max(Style.space(60), controller.recent.length * Style.space(52)))
+        height: Math.min(Style.space(160), Math.max(Style.space(50), controller.recent.length * Style.space(50)))
         clip: true
         model: controller.recent
         spacing: Style.space(4)
@@ -448,7 +782,7 @@ Panel {
         Text {
           anchors.centerIn: parent
           visible: controller.recent.length === 0
-          text: "暂无转写记录 · 按住 F9 开始语音输入"
+          text: "暂无转写记录 · 按住 " + controller.currentShortcutDisplay + " 开始语音输入"
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
@@ -458,13 +792,13 @@ Panel {
       PanelSeparator {}
 
       // Settings: API key
-      Row {
+      RowLayout {
         width: parent.width
         spacing: Style.space(8)
 
         TextField {
           id: keyField
-          width: parent.width - saveButton.width - Style.space(8)
+          Layout.fillWidth: true
           placeholderText: controller.apiKeyConfigured ? "API Key 已配置（输入以更换）" : "输入 DashScope API Key"
           echoMode: TextInput.Password
           color: root.foreground
@@ -489,7 +823,7 @@ Panel {
       }
 
       // Footer actions
-      Row {
+      RowLayout {
         width: parent.width
         spacing: Style.space(8)
 
@@ -507,13 +841,14 @@ Panel {
           fontFamily: root.fontFamily
           onClicked: controller.clearError()
         }
-        Item { Layout.fillWidth: true; width: parent.width - Style.space(260) }
+        Item { Layout.fillWidth: true }
         Text {
-          anchors.verticalCenter: parent.verticalCenter
-          text: "快捷键 F9"
+          text: controller.shortcutIcon(controller.currentShortcut) + " " + controller.currentShortcutDisplay
           color: root.dim
           font.family: root.fontFamily
-          font.pixelSize: Math.max(10, Style.font.body * 0.8)
+          font.pixelSize: Math.max(10, Style.font.body * 0.78)
+          elide: Text.ElideRight
+          Layout.maximumWidth: Style.space(180)
         }
       }
     }

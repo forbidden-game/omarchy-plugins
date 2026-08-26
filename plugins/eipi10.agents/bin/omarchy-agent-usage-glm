@@ -155,26 +155,29 @@ def main():
                     usage = ((entry.get("response") or {}).get("usage")) or {}
                     if not isinstance(usage, dict):
                         continue
-                    # Token accounting follows the codex collector: cached
-                    # input and cache writes count toward totals too.
-                    u_in = int(usage.get("inputTokens", 0) or 0)
+                    # inputTokens is inclusive of cached tokens (OpenAI-style
+                    # convention; every rollout event satisfies totalTokens ==
+                    # input + output). Split cache out so it is priced once at
+                    # the cache rate instead of also riding the input rate,
+                    # mirroring the Codex collector.
                     u_out = int(usage.get("outputTokens", 0) or 0)
                     u_cache_read = int(usage.get("cacheReadTokens", 0) or 0)
                     u_cache_write = int(usage.get("cacheWriteTokens", 0) or 0)
+                    u_in = max(0, int(usage.get("inputTokens", 0) or 0) - u_cache_read - u_cache_write)
                     tokens = u_in + u_out + u_cache_read + u_cache_write
                     session_id = entry.get("sessionId")
+                    turn_id = entry.get("turnId")
+                    day = event_day(entry)
+                    if day is None:
+                        continue
                     if session_id:
                         alltime_sessions.add(str(session_id))
                     # One user turn fans out into many model calls inside the
                     # agent loop — a prompt is the turn, not the call.
-                    turn_id = entry.get("turnId")
                     if turn_id:
                         alltime_turns.add(str(turn_id))
                         if day == today:
                             today_turns.add(str(turn_id))
-                    day = event_day(entry)
-                    if day is None:
-                        continue
                     daily_tokens[day] += tokens
                     daily_events[day] += 1
                     total_tokens += tokens

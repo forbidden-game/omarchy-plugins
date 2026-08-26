@@ -132,6 +132,8 @@ def main():
     today_by_model = defaultdict(int)
     alltime_split = defaultdict(lambda: defaultdict(int))
     alltime_sessions = set()
+    alltime_turns = set()
+    today_turns = set()
     total_tokens = 0
 
     paths = sorted(glob.glob(os.path.join(ROLLOUT_DIR, "*.jsonl")))
@@ -163,6 +165,13 @@ def main():
                     session_id = entry.get("sessionId")
                     if session_id:
                         alltime_sessions.add(str(session_id))
+                    # One user turn fans out into many model calls inside the
+                    # agent loop — a prompt is the turn, not the call.
+                    turn_id = entry.get("turnId")
+                    if turn_id:
+                        alltime_turns.add(str(turn_id))
+                        if day == today:
+                            today_turns.add(str(turn_id))
                     day = event_day(entry)
                     if day is None:
                         continue
@@ -236,7 +245,7 @@ def main():
         "limits": limits,
         "usageStatusText": "" if limits or not api_key else quota_error,
         "authHelpText": help_text,
-        "todayPrompts": daily_events.get(today, 0),
+        "todayPrompts": len(today_turns),
         "todaySessions": len(today_sessions),
         "todayTotalTokens": daily_tokens.get(today, 0),
         "todayTokensByModel": dict(today_by_model),
@@ -245,7 +254,7 @@ def main():
             {"date": day.isoformat(), "messageCount": daily_tokens.get(day, 0)}
             for day in week_days
         ],
-        "totalPrompts": sum(daily_events.values()),
+        "totalPrompts": len(alltime_turns),
         "totalSessions": len(alltime_sessions),
         "totalTokens": total_tokens,
         "activeDays": len(daily_tokens),

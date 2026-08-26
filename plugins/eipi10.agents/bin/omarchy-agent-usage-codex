@@ -112,11 +112,16 @@ total_prompts = 0
 total_sessions = set()
 seen_pi_messages = set()
 
+# Prompts count agent turns (Codex CLI emits one turn_context per task),
+# not per usage event — a single message fans out into many model calls.
+turn_counts = {"today": 0, "total": 0}
+
 
 def add_usage(day, session_key, model, input_tokens, output_tokens, cache_read, cache_write):
-  global today_prompts, today_total_tokens, total_prompts
+  # Usage events are not prompts: prompts are counted from turn_context
+  # markers on the native rollout path (see turn_counts).
+  global today_total_tokens
   total = input_tokens + output_tokens + cache_read + cache_write
-  total_prompts += 1
   total_sessions.add(session_key)
   active_days.add(day)
 
@@ -135,7 +140,6 @@ def add_usage(day, session_key, model, input_tokens, output_tokens, cache_read, 
     recent[day]["messageCount"] += total
 
   if day == today:
-    today_prompts += 1
     today_sessions.add(session_key)
     today_total_tokens += total
     today_tokens_by_model[model] = today_tokens_by_model.get(model, 0) + total
@@ -325,6 +329,10 @@ def scan_native_codex_sessions():
           if entry.get("type") == "turn_context":
             payload = entry.get("payload") or {}
             current_model = model_name(payload.get("model") or payload.get("model_slug") or current_model)
+            turn_day = local_day(entry.get("timestamp") or path.stat().st_mtime)
+            turn_counts["total"] += 1
+            if turn_day == today:
+              turn_counts["today"] += 1
             continue
           payload = entry.get("payload") or entry
           if entry.get("type") == "response_item" and isinstance(payload, dict):
@@ -640,14 +648,14 @@ def local_stats():
       today_total_cost += calculate_cost(m, inp, out, cr, cw)
 
   return {
-    "todayPrompts": today_prompts,
+    "todayPrompts": turn_counts["today"],
     "todaySessions": len(today_sessions),
     "todayTotalTokens": today_total_tokens,
     "todayTotalCost": round(today_total_cost, 4),
     "todayTokensByModel": today_tokens_by_model,
     "todayModelUsage": today_model_usage,
     "recentDays": [recent[day] for day in recent_dates],
-    "totalPrompts": total_prompts,
+    "totalPrompts": turn_counts["total"],
     "totalSessions": len(total_sessions),
     "activeDays": len(active_days),
     "activeDates": sorted(active_days),

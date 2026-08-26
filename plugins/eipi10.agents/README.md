@@ -54,6 +54,12 @@ prints the record contract (see the `claude` and `codex` collectors in
 with an `assets/<id>-light.svg` twin if the mark needs a dark variant for
 light surfaces — and the bar glyph stands in when there is none.
 
+Prompts are counted as agent turns, not model calls: one message that fans
+out into a dozen tool-loop calls is still one prompt. GLM dedupes `turnId`
+from ZCode's rollout logs; the Codex readers count one `turn_context` per
+task in the CLI session files. Usage events from sources without turn
+markers contribute tokens only, never prompts.
+
 | Collector | Limits | Local stats |
 |---|---|---|
 | `claude` | Anthropic's OAuth usage endpoint (5-hour session + 7-day weekly) | `~/.claude/projects` transcripts, opencode sessions on an Anthropic provider, plus `stats-cache.json` and `history.jsonl` as fallback |

@@ -40,11 +40,13 @@ var DEFAULT_RATES = {
   "claude-3-5-haiku": { input: 0.80, output: 4.00, cacheRead: 0.08, cacheWrite: 1.00 },
   "claude-3-opus": { input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75 },
 
-  // GLM (Zhipu/Z.ai official pricing — https://docs.z.ai/guides/overview/pricing,
-  // checked 2026-08-27. GLM-5.3-Flash is on a 50% promo through 2026-09-09:
-  // list $0.15/$0.03/$0.50 -> current $0.075/$0.015/$0.25; no cache-write surcharge)
-  "glm-5.3-flash": { input: 0.075, output: 0.25, cacheRead: 0.015, cacheWrite: 0.075 },
-  "glm-5.3": { input: 1.40, output: 4.40, cacheRead: 0.26, cacheWrite: 1.40 },
+  // GLM (Zhipu BigModel domestic schedule — https://bigmodel.cn/pricing,
+  // scraped 2026-08-27; CNY converted at 7.2/USD, same basis as Qwen.
+  // GLM-5.3-Flash is on a two-week 50% promo: current ¥0.4 input / ¥0.115
+  // cache-hit / ¥1.4 output per M, list ¥0.8/¥0.23/¥2.8. No cache-write
+  // surcharge. This is the platform the Coding Plan traffic bills on.)
+  "glm-5.3-flash": { input: 0.056, output: 0.194, cacheRead: 0.016, cacheWrite: 0.056 },
+  "glm-5.3": { input: 1.11, output: 3.89, cacheRead: 0.28, cacheWrite: 1.11 },
 
   // Qwen (Alibaba DashScope/Bailian official list price for Qwen3.8-27B:
   // CNY 3 input / 12 output / 0.6 cache-hit / 3.75 cache-write per M tokens,

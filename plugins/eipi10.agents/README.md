@@ -23,11 +23,11 @@ cross-device aggregation); `Agent.qml` is the per-record file watcher.
 - **Tokens by day** — one row per day for the last week across all agents:
   day, bar, tokens, with today bolded at the bottom. Hover today for its
   prompt and session count.
-- **Spend by agent** — one group per subscription with a rated subtotal, then
-  that agent's models indented under it, each scaled to the group's heaviest
-  model. Hover a model row for the input / output / cache split and the rates
-  applied. Rates live in `js/Pricing.js` with their official sources and the
-  date they were checked.
+- **Tokens & cost by model** — one flat ranking across every agent, heaviest
+  token consumer first, each row tagged with the subscription that ran it.
+  Hover a row for the input / output / cache split and the rates applied.
+  Rates live in `js/Pricing.js` with their official sources and the date
+  they were checked.
 
 A subscription appears only when it is enabled in settings and has actually
 recorded usage — on this machine or on a synced one. With one such agent

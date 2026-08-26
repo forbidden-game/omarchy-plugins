@@ -333,6 +333,7 @@ Item {
     var modelMap = {}
     var todayModelMap = {}
     var todayByModelMap = {}
+    var todayModelOwners = ({})
     var dateSet = {}
     var todayPrompts = 0, todaySessions = 0, todayTotalTokens = 0, todayTotalCost = 0
     var totalPrompts = 0, totalSessions = 0
@@ -370,6 +371,12 @@ Item {
 
       mergeModelMap(modelMap, p.modelUsage || {})
       mergeModelMap(todayModelMap, p.todayModelUsage || {})
+
+      var todaySrc = p.todayModelUsage || {}
+      for (var ownerId in todaySrc) {
+        if (!todayModelOwners[ownerId]) todayModelOwners[ownerId] = p.providerName
+        else if (todayModelOwners[ownerId].indexOf(p.providerName) < 0) todayModelOwners[ownerId] += " / " + p.providerName
+      }
 
       var byModel = p.todayTokensByModel || {}
       for (var model in byModel) todayByModelMap[model] = (todayByModelMap[model] || 0) + numberValue(byModel[model])
@@ -426,6 +433,7 @@ Item {
       todayTotalCost: todayTotalCost,
       todayTokensByModel: todayByModelMap,
       todayModelUsage: todayModelMap,
+      todayModelOwners: todayModelOwners,
       recentDays: recentDays,
       totalPrompts: totalPrompts,
       totalSessions: totalSessions,

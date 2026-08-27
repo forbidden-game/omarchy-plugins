@@ -1,12 +1,14 @@
 """Unit tests for the Omarvoice Antigravity protocol boundary."""
 
 from io import BytesIO
+import http.client
 import json
 from pathlib import Path
 import shutil
 import struct
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 import wave
@@ -54,6 +56,19 @@ class GrpcWebFrameTests(unittest.TestCase):
             bridge.read_frame(BytesIO(b"\x00\x00"))
 
         self.assertEqual(raised.exception.code, "protocol_error")
+
+    def test_local_transport_failure_has_retryable_error_code(self):
+        client = bridge.GrpcWebJsonClient(12345, "csrf")
+        connection = mock.Mock()
+        connection.request.side_effect = http.client.RemoteDisconnected(
+            "connection closed"
+        )
+        with mock.patch.object(client, "connection", return_value=connection):
+            with self.assertRaises(bridge.BridgeError) as raised:
+                client.request(bridge.START_PATH, {})
+
+        self.assertEqual(raised.exception.code, "engine_connection_error")
+        connection.close.assert_called_once()
 
 
 class TranscriptTests(unittest.TestCase):
@@ -211,6 +226,56 @@ class LiveServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "cancelled")
         self.assertTrue(recording.stop_requested)
         self.assertIsNone(daemon.recording)
+
+    def test_cloud_final_wins_when_local_rms_is_low(self):
+        stream = BytesIO(
+            bridge.encode_frame({"ready": {"sessionId": "session-1"}})
+            + bridge.encode_frame({
+                "transcription": {"text": "低音量也应识别", "isFinal": True}
+            })
+            + bridge.encode_frame({"complete": {}})
+        )
+
+        class FakeConnection:
+            def close(self):
+                pass
+
+        class FakeClient:
+            def request(self, _path, _payload):
+                return FakeConnection(), stream
+
+            def unary(self, _path, _payload):
+                return {}
+
+            def close(self):
+                pass
+
+        class FakeEngine:
+            def __init__(self):
+                self.client = FakeClient()
+
+            def ensure_ready(self):
+                return self.client, {
+                    "engine_reused": True,
+                    "auth_sync_ms": 0,
+                    "engine_start_ms": 0,
+                }
+
+            def close(self):
+                pass
+
+        recording = bridge.LiveRecording(FakeEngine(), Path("/tmp/quiet.wav"))
+        recording.started_at = time.monotonic()
+        recording.release_at = recording.started_at
+        recording.audio_bytes = bridge.PCM_BYTES_PER_SECOND
+        recording.speech_bytes = 0
+        recording.audio_queue.put(b"\x00\x00")
+        recording.audio_queue.put(recording._END_OF_AUDIO)
+
+        recording._stream_audio()
+
+        self.assertEqual(recording.result["status"], "success")
+        self.assertEqual(recording.result["detected_speech_ms"], 0)
 
 
 class CommandTests(unittest.TestCase):

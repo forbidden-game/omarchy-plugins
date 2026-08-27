@@ -427,6 +427,8 @@ Item {
         duration_ms: elapsedMs,
         outcome: code,
         audio_bytes: root.diagnosticAudioBytes,
+        audio_duration_ms: Number(result ? (result.audio_duration_ms || 0) : 0),
+        detected_speech_ms: Number(result ? (result.detected_speech_ms || 0) : 0),
         cloud_requests: root.diagnosticRequestCount,
         timings: result ? (result.timings || {}) : {}
       })

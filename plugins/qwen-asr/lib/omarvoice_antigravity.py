@@ -50,8 +50,7 @@ LIVE_PCM_CHUNK_BYTES = 6_400  # 200 ms of signed 16-bit, 16 kHz mono PCM.
 PCM_BYTES_PER_SECOND = 32_000
 SPEECH_RMS_THRESHOLD = 1_843  # -25 dBFS, matching the former ffmpeg probe.
 MIN_AUDIO_MS = 1_000
-MIN_SPEECH_MS = 600
-DAEMON_PROTOCOL_VERSION = 6
+DAEMON_PROTOCOL_VERSION = 7
 HTTPS_PORT_PATTERN = re.compile(r"listening on random port at (\d+) for HTTPS")
 
 
@@ -306,18 +305,25 @@ class GrpcWebJsonClient:
         http.client.HTTPSConnection, http.client.HTTPResponse
     ]:
         connection = self.connection()
-        connection.request(
-            "POST",
-            path,
-            body=encode_frame(payload),
-            headers={
-                "Content-Type": "application/grpc-web+json",
-                "Accept": "application/grpc-web+json",
-                "x-codeium-csrf-token": self.csrf_token,
-                "x-grpc-web": "1",
-            },
-        )
-        response = connection.getresponse()
+        try:
+            connection.request(
+                "POST",
+                path,
+                body=encode_frame(payload),
+                headers={
+                    "Content-Type": "application/grpc-web+json",
+                    "Accept": "application/grpc-web+json",
+                    "x-codeium-csrf-token": self.csrf_token,
+                    "x-grpc-web": "1",
+                },
+            )
+            response = connection.getresponse()
+        except (OSError, http.client.HTTPException) as exc:
+            connection.close()
+            raise BridgeError(
+                "engine_connection_error",
+                "Antigravity 本地听写引擎连接中断",
+            ) from exc
         if response.status != 200:
             connection.close()
             raise BridgeError(
@@ -414,6 +420,51 @@ def transcription_text(response: dict[str, Any]) -> tuple[str, bool] | None:
     return text, bool(transcription.get("isFinal"))
 
 
+def open_transcription_session(
+    client: GrpcWebJsonClient,
+    start_payload: dict[str, Any],
+) -> tuple[
+    http.client.HTTPSConnection,
+    http.client.HTTPResponse,
+    str,
+    str,
+    str,
+]:
+    """Open a streaming session and read through its ready message."""
+    connection, response = client.request(START_PATH, start_payload)
+    session_id = ""
+    partial_text = ""
+    final_text = ""
+    try:
+        while not session_id:
+            kind, value = read_frame(response)
+            if kind == "trailers":
+                grpc_message(value)
+                raise BridgeError(
+                    "protocol_error", "听写会话未返回 session id"
+                )
+            ready = value.get("ready") if isinstance(value, dict) else None
+            if isinstance(ready, dict):
+                session_id = str(ready.get("sessionId") or "")
+            transcript = (
+                transcription_text(value) if isinstance(value, dict) else None
+            )
+            if transcript:
+                partial_text = transcript[0]
+                if transcript[1]:
+                    final_text = transcript[0]
+        return (
+            connection,
+            response,
+            session_id,
+            partial_text,
+            final_text,
+        )
+    except Exception:
+        connection.close()
+        raise
+
+
 def transcribe(
     wav_path: Path,
     pre_cursor_text: str = "",
@@ -439,28 +490,17 @@ def transcribe(
         if post_cursor_text:
             start_payload["postCursorText"] = post_cursor_text
 
-        stream_connection, stream_response = client.request(START_PATH, start_payload)
-        final_text = ""
-        partial_text = ""
+        (
+            stream_connection,
+            stream_response,
+            session_id,
+            partial_text,
+            final_text,
+        ) = open_transcription_session(client, start_payload)
         reader_error: list[BridgeError] = []
         completed = threading.Event()
-        session_id = ""
 
         try:
-            while not session_id:
-                kind, value = read_frame(stream_response)
-                if kind == "trailers":
-                    grpc_message(value)
-                    raise BridgeError("protocol_error", "听写会话未返回 session id")
-                ready = value.get("ready") if isinstance(value, dict) else None
-                if isinstance(ready, dict):
-                    session_id = str(ready.get("sessionId") or "")
-                transcript = transcription_text(value) if isinstance(value, dict) else None
-                if transcript:
-                    partial_text = transcript[0]
-                    if transcript[1]:
-                        final_text = transcript[0]
-
             def read_responses() -> None:
                 nonlocal final_text, partial_text
                 try:
@@ -749,8 +789,6 @@ class LiveRecording:
         completed = threading.Event()
         try:
             setup_started_at = time.monotonic()
-            client, engine_timings = self.engine.ensure_ready()
-            timings.update(engine_timings)
             start_payload: dict[str, Any] = {
                 "mimeType": "audio/pcm;rate=16000",
                 "cascadeId": str(uuid.uuid4()),
@@ -761,27 +799,40 @@ class LiveRecording:
             if self.post_cursor_text:
                 start_payload["postCursorText"] = self.post_cursor_text
 
-            stream_connection, stream_response = client.request(
-                START_PATH, start_payload
-            )
             session_id = ""
-            while not session_id:
-                kind, value = read_frame(stream_response)
-                if kind == "trailers":
-                    grpc_message(value)
-                    raise BridgeError(
-                        "protocol_error", "听写会话未返回 session id"
+            stream_response: http.client.HTTPResponse
+            for attempt in range(2):
+                if attempt:
+                    start_payload["cascadeId"] = str(uuid.uuid4())
+                client, engine_timings = self.engine.ensure_ready()
+                if attempt == 0:
+                    timings.update(engine_timings)
+                else:
+                    timings["retry_auth_sync_ms"] = engine_timings.get(
+                        "auth_sync_ms", 0
                     )
-                ready = value.get("ready") if isinstance(value, dict) else None
-                if isinstance(ready, dict):
-                    session_id = str(ready.get("sessionId") or "")
-                transcript = (
-                    transcription_text(value) if isinstance(value, dict) else None
-                )
-                if transcript:
-                    partial_text = transcript[0]
-                    if transcript[1]:
-                        final_text = transcript[0]
+                    timings["retry_engine_start_ms"] = engine_timings.get(
+                        "engine_start_ms", 0
+                    )
+                try:
+                    (
+                        stream_connection,
+                        stream_response,
+                        session_id,
+                        partial_text,
+                        final_text,
+                    ) = open_transcription_session(client, start_payload)
+                    timings["session_attempts"] = attempt + 1
+                    break
+                except BridgeError as exc:
+                    if attempt > 0 or exc.code not in {
+                        "protocol_error",
+                        "engine_http_error",
+                        "engine_connection_error",
+                    }:
+                        raise
+                    timings["first_session_error"] = exc.code
+                    self.engine.close()
             timings["session_ready_ms"] = round(
                 (time.monotonic() - setup_started_at) * 1000
             )
@@ -841,10 +892,7 @@ class LiveRecording:
             client.unary(END_PATH, {"sessionId": session_id})
             request_count += 1
 
-            if (
-                audio_duration_ms < MIN_AUDIO_MS
-                or detected_speech_ms < MIN_SPEECH_MS
-            ):
+            if audio_duration_ms < MIN_AUDIO_MS:
                 raise BridgeError("no_speech", "未检测到有效语音")
 
             if not completed.wait(timeout=30):

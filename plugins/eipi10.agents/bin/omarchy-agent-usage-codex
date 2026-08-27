@@ -73,6 +73,8 @@ def model_name(raw):
   clean = value.lower().replace("//", "/")
   if "gemini-3.7-flash" in clean or "gemini-3-7-flash" in clean:
     return "gemini-3.7-flash"
+  if "glm-5.3" in clean and "flash" in clean:
+    return "glm-5.3-flash"
   return value if value else "codex"
 
 

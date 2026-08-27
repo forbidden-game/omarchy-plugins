@@ -14,6 +14,7 @@ var MODEL_INDEX_MAP = {
   "gemini-default": 6,          // Slot 6: Muted / Gray
   "deepseek-v4-flash": 2,       // Slot 2: Cyan / Teal
   "deepseek/deepseek-v4-flash": 2,
+  "glm-5.3-flash": 5,
   "gpt-5.6-sol": 3,             // Slot 3: Orange
   "gpt-5.6-sol-372k": 3,
   "claude-sonnet-4-6": 4,       // Slot 4: Green / Rose
@@ -89,6 +90,7 @@ var FRIENDLY_NAMES = {
   "gemini-default": "Gemini (Default)",
   "deepseek-v4-flash": "DeepSeek V4 Flash",
   "deepseek/deepseek-v4-flash": "DeepSeek V4 Flash",
+  "glm-5.3-flash": "GLM-5.3 Flash",
   "gpt-5.6-sol": "GPT-5.6 Sol",
   "gpt-5.6-sol-372k": "GPT-5.6 Sol 372k",
   "gpt-5.6-luna": "GPT-5.6 Luna",

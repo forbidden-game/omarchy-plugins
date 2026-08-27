@@ -109,9 +109,9 @@ secret is stored in this repository.
 
 Omarvoice reuses the active Antigravity account and long-lived OAuth flow from
 this plugin. `voice-auth-status` exposes readiness metadata only;
-`voice-auth-sync` refreshes the canonical credential and writes Antigravity's
-native token shape directly to the desktop keyring. No token is printed or
-passed through QML.
+`voice-auth-sync` refreshes the canonical credential only when its access
+token is near expiry, then writes Antigravity's native token shape directly to
+the desktop keyring. No token is printed or passed through QML.
 
 Antigravity 2.11 dictation requires the additional
 `https://www.googleapis.com/auth/aicode` scope. The OAuth flow requests it for

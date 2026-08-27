@@ -84,6 +84,52 @@ class VoiceAuthTests(unittest.TestCase):
         self.assertIs(controller.subprocess.DEVNULL, run.call_args.kwargs["stdout"])
         self.assertIs(controller.subprocess.DEVNULL, run.call_args.kwargs["stderr"])
 
+    def test_sync_reuses_access_token_with_safe_remaining_lifetime(self):
+        output = StringIO()
+        stored = mock.Mock(returncode=0)
+        credential = {
+            "access_token": "still-valid-access",
+            "refresh_token": "private-refresh",
+            "expired": "2999-01-01T00:00:00+00:00",
+            "token_type": "Bearer",
+            "scope": controller.AICODE_SCOPE,
+        }
+        with mock.patch.object(controller, "ensure_storage_migrated"):
+            with mock.patch.object(
+                controller,
+                "current_account",
+                return_value={"id": "account-1", "email": "voice@example.com"},
+            ):
+                with mock.patch.object(
+                    controller, "load_credential", return_value=credential
+                ):
+                    with mock.patch.object(
+                        controller, "refresh_credential"
+                    ) as refresh:
+                        with mock.patch.object(
+                            controller.shutil,
+                            "which",
+                            return_value="/usr/bin/secret-tool",
+                        ):
+                            with mock.patch.object(
+                                controller.subprocess, "run", return_value=stored
+                            ):
+                                with redirect_stdout(output):
+                                    exit_code = controller.voice_auth_sync()
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(result["refreshed"])
+        refresh.assert_not_called()
+
+    def test_token_near_expiry_requires_refresh(self):
+        credential = {
+            "access_token": "expiring",
+            "expired": "2000-01-01T00:00:00+00:00",
+        }
+
+        self.assertTrue(controller.credential_needs_refresh(credential))
+
 
 if __name__ == "__main__":
     unittest.main()

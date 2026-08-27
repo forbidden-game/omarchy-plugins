@@ -716,6 +716,28 @@ def load_credential(account_id):
         return {}
 
 
+def credential_needs_refresh(credential, min_validity_seconds=300):
+    """Refresh only when the access token is absent or close to expiry."""
+    if not credential.get("access_token"):
+        return True
+    expiry = credential.get("expired")
+    if expiry:
+        try:
+            expires_at = datetime.fromisoformat(str(expiry).replace("Z", "+00:00"))
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+            return remaining <= min_validity_seconds
+        except (TypeError, ValueError):
+            pass
+    try:
+        issued_at = float(credential.get("timestamp") or 0) / 1000
+        expires_in = float(credential.get("expires_in") or 0)
+        return issued_at + expires_in - time.time() <= min_validity_seconds
+    except (TypeError, ValueError):
+        return True
+
+
 def current_account():
     """Return the active account stub without exposing its credential."""
     if not ACCOUNTS_INDEX.is_file():
@@ -852,7 +874,7 @@ def voice_auth_status():
 
 
 def voice_auth_sync():
-    """Refresh Agent Panel auth and securely hand it to Antigravity's token store."""
+    """Ensure valid auth and securely hand it to Antigravity's token store."""
     ensure_storage_migrated()
     account = current_account()
     if not account:
@@ -870,15 +892,22 @@ def voice_auth_sync():
         }, ensure_ascii=False))
         return 1
 
-    try:
-        credential, granted_scopes = refresh_credential(account.get("id"))
-    except RuntimeError as exc:
-        print(json.dumps({
-            "status": "refresh_failed",
-            "ready": False,
-            "message": str(exc),
-        }, ensure_ascii=False))
-        return 1
+    credential = load_credential(account.get("id"))
+    granted_scopes = set(str(credential.get("scope") or "").split())
+    refreshed = False
+    if credential_needs_refresh(credential):
+        try:
+            credential, granted_scopes = refresh_credential(account.get("id"))
+            refreshed = True
+        except RuntimeError as exc:
+            print(json.dumps({
+                "status": "refresh_failed",
+                "ready": False,
+                "message": str(exc),
+            }, ensure_ascii=False))
+            return 1
+    elif AICODE_SCOPE not in granted_scopes:
+        granted_scopes = token_scopes(credential.get("access_token"))
 
     if AICODE_SCOPE not in granted_scopes:
         print(json.dumps({
@@ -924,6 +953,7 @@ def voice_auth_sync():
         "status": "ready",
         "ready": True,
         "email": account.get("email") or "",
+        "refreshed": refreshed,
         "message": "Agent Panel 长期鉴权已同步",
     }, ensure_ascii=False))
     return 0

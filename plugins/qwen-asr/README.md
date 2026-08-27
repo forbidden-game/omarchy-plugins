@@ -11,19 +11,19 @@ shortcuts, settings, history, and runtime symlinks keep working.
 
 The transcription path is intentionally split into three readable boundaries:
 
-1. QML records audio, renders the live level meter, and owns clipboard/history.
-2. `bin/omarvoice-antigravity` converts the WAV to mono PCM and implements
-   Antigravity's `StreamAudioTranscription`, `SendAudioChunk`, and
-   `EndAudioSession` gRPC-Web flow.
+1. QML owns push-to-talk state, the live level meter, clipboard, and history.
+2. A private per-user `omarvoice-antigravity` service keeps Antigravity's
+   language server warm. It captures 16 kHz mono PCM in 200 ms chunks, saves a
+   recovery WAV, and streams those chunks while the user is still speaking.
 3. Agent Panel remains the only owner of the account index and long-lived
-   OAuth credential. Before a session it refreshes the active account and
-   synchronizes Antigravity's system-keyring entry without returning a token
-   to Omarvoice.
+   OAuth credential. It refreshes only near token expiry and synchronizes
+   Antigravity's system-keyring entry without returning a token to Omarvoice.
 
-The adapter starts Antigravity's language server without the Electron UI.
-OAuth material is never placed in QML, command-line arguments, transcript
-history, or diagnostics. The short-lived engine state is created in a private
-temporary directory and removed after each transcription.
+The service starts Antigravity's language server without the Electron UI and
+keeps the cloud transcription session active while audio arrives. OAuth
+material is never placed in QML, command-line arguments, transcript history,
+or diagnostics. Runtime state and the Unix socket are private to the desktop
+user.
 
 ## Installation
 
@@ -37,7 +37,10 @@ Prerequisites:
 
 - Antigravity 2.11 or newer installed at `/opt/Antigravity`
 - an Antigravity account configured in the `eipi10.agents` Agent Panel
-- `pw-record`, `ffmpeg`, `secret-tool`, `wl-copy`, and `wtype`
+- `pw-record`, `secret-tool`, `wl-copy`, and `wtype`
+
+`ffmpeg` is needed only by the backward-compatible `transcribe <wav>` CLI,
+not by the live push-to-talk path.
 
 Antigravity dictation adds the Google OAuth scope
 `https://www.googleapis.com/auth/aicode`. Accounts authorized before this
@@ -73,9 +76,9 @@ Existing storage paths are retained for a no-loss migration:
 Any legacy `apiKey` entry in the settings file is ignored and never loaded by
 Omarvoice.
 
-Diagnostics contain stage timings, provider outcomes, audio byte counts, and
-request counts. They never contain OAuth credentials, audio payloads, or
-transcript text.
+Diagnostics contain service warmup, session-ready, release-to-final, provider
+outcome, audio byte, and request-count timings. They never contain OAuth
+credentials, audio payloads, or transcript text.
 
 ## License
 

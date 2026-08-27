@@ -8,8 +8,8 @@ import Quickshell.Services.Pipewire
 //
 // All state transitions run through `state`:
 //   idle -> arming -> recording -> transcribing -> idle
-// `arming` means MediaRecorder has been asked to record but its backend has
-// not yet confirmed RecordingState. Errors return to idle and are classified
+// `arming` means the resident service is starting live microphone capture.
+// Errors return to idle and are classified
 // separately by `errorKind` so the bar never confuses stale failures with an
 // active recording.
 //
@@ -36,8 +36,6 @@ Item {
   readonly property string recordingsDir: historyDir + "/recordings"
   readonly property string model: "antigravity-cloud"
   readonly property string bridgeBinary: homeDir + "/.config/omarchy/plugins/qwen-asr/bin/omarvoice-antigravity"
-  readonly property int sampleRate: 16000
-  readonly property int channels: 1
   readonly property int minRecordingMs: 1000
 
   // ---------------------------------------------------------------- state
@@ -50,6 +48,7 @@ Item {
   property string authMessage: "正在检查 Agent Panel 鉴权…"
   property string authAccount: ""
   property int authPollCount: 0
+  property bool serviceReady: false
   property int elapsedSec: 0
   property var recent: [] // [{time, text}] most recent first, max 10
 
@@ -235,6 +234,12 @@ Item {
     authorizeProc.running = true
   }
 
+  function warmService() {
+    if (!root.authReady || warmupProc.running) return
+    warmupProc.command = [root.bridgeBinary, "warmup"]
+    warmupProc.running = true
+  }
+
   function setAutoPaste(enabled) {
     root.autoPaste = enabled
     writeConfigKey("autoPaste", enabled ? "true" : "false", null)
@@ -275,13 +280,6 @@ Item {
     onTriggered: root.elapsedSec++
   }
 
-  Process {
-    id: recordProc
-    onExited: function(code) {
-      root.onRecordExited(code)
-    }
-  }
-
   function startRecording() {
     if (root.state !== "idle") return
     root.clearError()
@@ -305,36 +303,114 @@ Item {
     root.stopWhenReady = false
     root.elapsedSec = 0
     root.resetLevel()
-    root.state = "recording"
-    root.hudStatus = "recording"
+    root.state = "arming"
+    root.hudStatus = "arming"
     root.hudVisible = true
     hudDismissTimer.stop()
 
-    recordProc.command = ["bash", "-c",
-      "mkdir -p " + shellQuote(root.recordingsDir)
-      + " && exec pw-record --rate " + root.sampleRate
-      + " --channels " + root.channels
-      + " --format s16 " + shellQuote(root.recPath)]
-    recordProc.running = true
+    root.diagnosticTraceId = name.slice(0, -4)
+    root.diagnosticStage = "live_start"
+    root.diagnosticPipelineStartMs = now
+    root.diagnosticStageStartMs = now
+    root.diagnosticApiStartMs = 0
+    root.diagnosticAudioBytes = 0
+    root.diagnosticRequestCount = 0
+    root.appendDiagnostic("pipeline_started", {
+      model: root.model,
+      mode: "live_stream"
+    })
+
+    recordStartProc.command = [root.bridgeBinary, "record-start", root.recPath]
+    recordStartProc.contextPath = root.recPath
+    recordStartProc.running = true
   }
 
   function stopRecording() {
-    if (root.state !== "recording") return
+    if (root.state !== "arming" && root.state !== "recording") return
     if (Date.now() - root.recordStartMs < root.minRecordingMs) {
       root.discardNextStop = true
       root.hudVisible = false
       root.hudStatus = "idle"
     }
-    recordProc.running = false
+    if (root.state === "arming") {
+      root.stopWhenReady = true
+      return
+    }
+    root.stopLiveRecording()
   }
 
-  function onRecordExited(code) {
-    var path = root.recPath
+  function onLiveStartFinished(output, path, ok) {
+    var result = parseBridgeResult(output)
+    root.appendDiagnostic("stage_finished", {
+      stage: "live_start",
+      duration_ms: Math.round(Date.now() - root.diagnosticStageStartMs),
+      outcome: ok && result && result.status === "recording" ? "success" : "error",
+      service_start_ms: result ? Number(result.start_ms || 0) : 0
+    })
+    if (!ok || !result || result.status !== "recording") {
+      var message = result ? String(result.message || "无法启动实时听写")
+        : "Omarvoice 常驻服务没有返回有效结果"
+      root.recPath = ""
+      root.stopWhenReady = false
+      root.fail(message + "；WAV 已保留", "recording")
+      return
+    }
+    root.serviceReady = true
+    root.state = "recording"
+    root.hudStatus = "recording"
+    if (root.stopWhenReady) {
+      root.stopWhenReady = false
+      root.stopLiveRecording()
+    }
+  }
+
+  function stopLiveRecording() {
+    if (recordStopProc.running) return
+    root.state = "transcribing"
+    if (!root.discardNextStop) {
+      root.hudStatus = "transcribing"
+      root.hudVisible = true
+    }
+    hudDismissTimer.stop()
+    root.diagnosticStage = "cloud_finalize"
+    root.diagnosticStageStartMs = Date.now()
+    root.diagnosticApiStartMs = root.diagnosticStageStartMs
+    root.appendDiagnostic("request_started", {
+      attempt: 1,
+      provider: root.model,
+      phase: "release_to_final"
+    })
+    recordStopProc.command = [
+      root.bridgeBinary,
+      root.discardNextStop ? "record-cancel" : "record-stop"
+    ]
+    recordStopProc.contextPath = root.recPath
+    recordStopProc.running = true
+  }
+
+  function parseBridgeResult(output) {
+    try { return JSON.parse(String(output || "").trim()) }
+    catch (e) { return null }
+  }
+
+  function onLiveStopFinished(output, path, ok) {
+    var result = parseBridgeResult(output)
+    var elapsedMs = Math.round(Date.now() - root.diagnosticApiStartMs)
     root.recPath = ""
+    root.stopWhenReady = false
+    root.diagnosticAudioBytes = result ? Number(result.audio_bytes || 0) : 0
+    root.diagnosticRequestCount = result ? Number(result.request_count || 0) : 0
 
     if (root.discardNextStop) {
       root.discardNextStop = false
-      root.stopWhenReady = false
+      root.appendDiagnostic("pipeline_finished", {
+        outcome: "cancelled",
+        total_ms: Math.round(Date.now() - root.diagnosticPipelineStartMs),
+        post_release_ms: elapsedMs,
+        audio_bytes: root.diagnosticAudioBytes
+      })
+      root.diagnosticTraceId = ""
+      root.diagnosticStage = "idle"
       root.state = "idle"
       root.hudVisible = false
       root.hudStatus = "idle"
@@ -342,110 +418,17 @@ Item {
       return
     }
 
-    if (root.state !== "recording") {
-      removeFile(path)
-      return
-    }
-
-    if (path === "") {
-      root.fail("录音失败：未指定音频输出路径", "recording")
-      return
-    }
-
-    root.transcribe(path)
-  }
-
-  // ---------------------------------------------------------------- ASR
-  function transcribe(path) {
-    root.state = "transcribing"
-    root.hudStatus = "transcribing"
-    root.hudVisible = true
-    hudDismissTimer.stop()
-    var filename = path.slice(path.lastIndexOf("/") + 1)
-    root.diagnosticTraceId = filename.endsWith(".wav") ? filename.slice(0, -4) : filename
-    root.diagnosticStage = "speech_probe"
-    root.diagnosticPipelineStartMs = Date.now()
-    root.diagnosticStageStartMs = root.diagnosticPipelineStartMs
-    root.diagnosticApiStartMs = 0
-    root.diagnosticAudioBytes = 0
-    root.diagnosticRequestCount = 0
-    root.appendDiagnostic("pipeline_started", {
-      model: root.model,
-      recording_seconds: root.elapsedSec
-    })
-
-    speechProbeProc.command = ["ffmpeg", "-hide_banner", "-nostats", "-i", path,
-      "-af", "silencedetect=noise=-25dB:d=0.2", "-f", "null", "-"]
-    speechProbeProc.contextPath = path
-    speechProbeProc.running = true
-  }
-
-  function onSpeechProbeReady(log, path, ok) {
-    if (!ok) {
-      root.appendDiagnostic("stage_finished", {
-        stage: "speech_probe",
-        duration_ms: Math.round(Date.now() - root.diagnosticStageStartMs),
-        outcome: "error"
-      })
-      root.fail("无法检测录音中的有效语音；WAV 已保留", "recording")
-      return
-    }
-    var durationMatch = String(log).match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/)
-    if (!durationMatch) {
-      root.appendDiagnostic("stage_finished", {
-        stage: "speech_probe",
-        duration_ms: Math.round(Date.now() - root.diagnosticStageStartMs),
-        outcome: "invalid_duration"
-      })
-      root.fail("无法读取录音时长；WAV 已保留", "recording")
-      return
-    }
-    var duration = Number(durationMatch[1]) * 3600
-      + Number(durationMatch[2]) * 60 + Number(durationMatch[3])
-    var silence = 0
-    var silenceRe = /silence_duration:\s*([0-9.]+)/g
-    var match = null
-    while ((match = silenceRe.exec(String(log))) !== null) silence += Number(match[1])
-    root.appendDiagnostic("stage_finished", {
-      stage: "speech_probe",
-      duration_ms: Math.round(Date.now() - root.diagnosticStageStartMs),
-      outcome: "success",
-      audio_duration_ms: Math.round(duration * 1000),
-      detected_speech_ms: Math.round(Math.max(0, duration - silence) * 1000)
-    })
-    if (duration < 1 || duration - silence < 0.6) {
-      root.fail("未检测到有效语音；WAV 已保留", "input")
-      return
-    }
-    root.diagnosticStage = "cloud"
-    root.diagnosticStageStartMs = Date.now()
-    root.diagnosticApiStartMs = root.diagnosticStageStartMs
-    root.diagnosticRequestCount = 1
-    root.appendDiagnostic("request_started", {
-      attempt: 1,
-      provider: root.model
-    })
-    transcribeProc.command = [root.bridgeBinary, "transcribe", path]
-    transcribeProc.contextPath = path
-    transcribeProc.running = true
-  }
-
-  function onCloudFinished(output, path, ok) {
-    var result = null
-    try {
-      result = JSON.parse(String(output || "").trim())
-    } catch (e) {
-      result = null
-    }
-    var elapsedMs = Math.round(Date.now() - root.diagnosticApiStartMs)
     if (!ok || !result || result.status !== "success") {
       var code = result ? String(result.code || "provider_error") : "bridge_error"
       var message = result ? String(result.message || "Omarvoice 云端听写失败")
-        : "Omarvoice 听写桥接服务没有返回有效结果"
+        : "Omarvoice 常驻服务没有返回有效结果"
       root.appendDiagnostic("request_finished", {
         attempt: 1,
         duration_ms: elapsedMs,
-        outcome: code
+        outcome: code,
+        audio_bytes: root.diagnosticAudioBytes,
+        cloud_requests: root.diagnosticRequestCount,
+        timings: result ? (result.timings || {}) : {}
       })
       if (code === "reauthorize_required" || code === "authorization_required") {
         root.authReady = false
@@ -453,18 +436,20 @@ Item {
         root.authMessage = message
       }
       var kind = code === "reauthorize_required" || code === "authorization_required"
-        ? "auth" : (code.indexOf("network") >= 0 ? "offline" : "asr")
+        ? "auth" : (code === "no_speech" ? "input"
+          : (code.indexOf("network") >= 0 ? "offline" : "asr"))
       root.fail(message + "；WAV 已保留", kind)
       return
     }
-    root.diagnosticAudioBytes = Number(result.audio_bytes || 0)
-    root.diagnosticRequestCount = Number(result.request_count || 1)
     root.appendDiagnostic("request_finished", {
       attempt: 1,
       duration_ms: elapsedMs,
       outcome: "success",
       audio_bytes: root.diagnosticAudioBytes,
-      cloud_requests: root.diagnosticRequestCount
+      audio_duration_ms: Number(result.audio_duration_ms || 0),
+      detected_speech_ms: Number(result.detected_speech_ms || 0),
+      cloud_requests: root.diagnosticRequestCount,
+      timings: result.timings || {}
     })
     root.finishTranscript(String(result.text || ""))
   }
@@ -826,26 +811,39 @@ Item {
 
 
   Process {
-    id: speechProbeProc
-    property string contextPath: ""
-    stderr: StdioCollector { waitForEnd: true }
+    id: warmupProc
+    stdout: StdioCollector { waitForEnd: true }
     onExited: function(code) {
-      var path = speechProbeProc.contextPath
-      var log = speechProbeProc.stderr.text
-      speechProbeProc.contextPath = ""
-      root.onSpeechProbeReady(log, path, code === 0)
+      var result = root.parseBridgeResult(warmupProc.stdout.text)
+      root.serviceReady = code === 0 && result && result.ready === true
+      root.appendDiagnostic("service_warmup", {
+        outcome: root.serviceReady ? "success" : "error",
+        timings: result ? (result.timings || {}) : {}
+      })
     }
   }
 
   Process {
-    id: transcribeProc
+    id: recordStartProc
     property string contextPath: ""
     stdout: StdioCollector { waitForEnd: true }
     onExited: function(code) {
-      var output = transcribeProc.stdout.text
-      var path = transcribeProc.contextPath
-      transcribeProc.contextPath = ""
-      root.onCloudFinished(output, path, code === 0)
+      var output = recordStartProc.stdout.text
+      var path = recordStartProc.contextPath
+      recordStartProc.contextPath = ""
+      root.onLiveStartFinished(output, path, code === 0)
+    }
+  }
+
+  Process {
+    id: recordStopProc
+    property string contextPath: ""
+    stdout: StdioCollector { waitForEnd: true }
+    onExited: function(code) {
+      var output = recordStopProc.stdout.text
+      var path = recordStopProc.contextPath
+      recordStopProc.contextPath = ""
+      root.onLiveStopFinished(output, path, code === 0)
     }
   }
 
@@ -867,6 +865,7 @@ Item {
       if (root.authReady) {
         root.authState = "ready"
         authPollTimer.stop()
+        root.warmService()
       } else if (result && (result.code === "reauthorize_required"
                            || result.status === "reauthorize_required")) {
         root.authState = root.authState === "authorizing" ? "authorizing" : "reauthorize"

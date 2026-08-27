@@ -144,6 +144,75 @@ class TranscriptTests(unittest.TestCase):
         self.assertEqual(fake_client.calls[2][1]["sequenceNumber"], 1)
 
 
+class LiveServiceTests(unittest.TestCase):
+    def test_pcm_rms_distinguishes_silence_from_speech(self):
+        silence = b"\x00\x00" * 100
+        speech = struct.pack("<h", 5_000) * 100
+
+        self.assertEqual(bridge.pcm_rms(silence), 0)
+        self.assertGreater(bridge.pcm_rms(speech), bridge.SPEECH_RMS_THRESHOLD)
+
+    def test_persistent_engine_reuses_one_language_server(self):
+        class FakeProcess:
+            def poll(self):
+                return None
+
+        class FakeServer:
+            process = FakeProcess()
+            https_port = 12345
+            csrf_token = "csrf"
+
+            def __enter__(self):
+                return self
+
+            def close(self):
+                pass
+
+        fake_client = mock.Mock()
+        fake_client.close = mock.Mock()
+        engine = bridge.PersistentEngine()
+        with mock.patch.object(
+            bridge,
+            "run_agent_controller",
+            return_value={"ready": True, "email": "voice@example.com"},
+        ) as sync:
+            with mock.patch.object(bridge, "LanguageServer", return_value=FakeServer()):
+                with mock.patch.object(
+                    bridge, "GrpcWebJsonClient", return_value=fake_client
+                ):
+                    first, first_timings = engine.ensure_ready()
+                    second, second_timings = engine.ensure_ready()
+
+        self.assertIs(first, second)
+        self.assertEqual(sync.call_count, 1)
+        self.assertFalse(first_timings["engine_reused"])
+        self.assertTrue(second_timings["engine_reused"])
+
+    def test_cancel_detaches_recording_before_background_cleanup(self):
+        class FakeRecording:
+            audio_bytes = 123
+            wav_path = Path("/tmp/test.wav")
+
+            def __init__(self):
+                self.stop_requested = False
+
+            def request_stop(self):
+                self.stop_requested = True
+
+            def stop(self):
+                return {"status": "error", "code": "no_speech"}
+
+        daemon = bridge.OmarvoiceDaemon()
+        recording = FakeRecording()
+        daemon.recording = recording
+
+        result = daemon._cancel_recording()
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertTrue(recording.stop_requested)
+        self.assertIsNone(daemon.recording)
+
+
 class CommandTests(unittest.TestCase):
     def test_status_output_contains_no_credential_material(self):
         with mock.patch.object(bridge, "language_server_path"):

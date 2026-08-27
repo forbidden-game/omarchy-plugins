@@ -4,12 +4,12 @@
 # omarchy:hidden=true
 """Collect Codex usage into one display-ready JSON record.
 
-Local stats come from native Codex CLI session files, every pi/omp session,
-every opencode session, and every agy (Antigravity) session, whatever provider
-each ran on: the panel is the machine's usage dashboard, so a pi or agy session
-on a non-Codex provider still belongs in the model breakdown. Rate limits and the
-plan stay Codex-only and come from the Codex app-server RPC. The agents panel
-only ever reads the JSON this prints.
+Local stats come from native Codex CLI and ZCode session files, every pi/omp
+session, every opencode session, and every agy (Antigravity) session, whatever
+provider each ran on. This is the single machine-wide usage dataset; the other
+collectors contribute subscription state only, so the panel never adds the same
+transcript twice. Rate limits and the plan stay Codex-only and come from the
+Codex app-server RPC. The agents panel only ever reads the JSON this prints.
 """
 
 import argparse
@@ -76,6 +76,17 @@ def model_name(raw):
   return value if value else "codex"
 
 
+def provider_has_own_usage_record(raw):
+  """Whether another collector already owns this provider's usage.
+
+  Claude's stock collector reads exact ``anthropic`` pi/opencode sessions,
+  while Fireworks reports account-global billing usage. Leaving those rows in
+  the shared scanner would add them again when provider records are merged.
+  """
+  provider = str(raw or "").strip().lower()
+  return provider == "anthropic" or "fireworks" in provider
+
+
 def runtime_env():
   home = str(Path.home())
   path_parts = [
@@ -99,7 +110,10 @@ def find_command(name):
 now = datetime.now()
 today = now.strftime("%Y-%m-%d")
 recent_dates = [(now - timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(6, -1, -1)]
-recent = {day: {"date": day, "messageCount": 0} for day in recent_dates}
+recent = {
+  day: {"date": day, "messageCount": 0, "models": {}}
+  for day in recent_dates
+}
 today_tokens_by_model = {}
 today_model_usage = {}
 model_usage = {}
@@ -111,6 +125,7 @@ today_total_tokens = 0
 total_prompts = 0
 total_sessions = set()
 seen_pi_messages = set()
+zcode_turns = set()
 
 # Prompts count agent turns (Codex CLI emits one turn_context per task),
 # not per usage event — a single message fans out into many model calls.
@@ -138,6 +153,16 @@ def add_usage(day, session_key, model, input_tokens, output_tokens, cache_read, 
 
   if day in recent:
     recent[day]["messageCount"] += total
+    day_bucket = recent[day]["models"].setdefault(model, {
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0,
+    })
+    day_bucket["inputTokens"] += input_tokens
+    day_bucket["outputTokens"] += output_tokens
+    day_bucket["cacheReadInputTokens"] += cache_read
+    day_bucket["cacheCreationInputTokens"] += cache_write
 
   if day == today:
     today_sessions.add(session_key)
@@ -202,6 +227,8 @@ def scan_pi_sessions():
       seen_pi_messages.add(message_key)
       message = entry.get("message") or {}
       if message.get("role") != "assistant":
+        continue
+      if provider_has_own_usage_record(message.get("provider")):
         continue
 
       usage = message.get("usage") or {}
@@ -272,6 +299,8 @@ def scan_opencode_sessions():
       try:
         entry = json.loads(raw)
         if not isinstance(entry, dict) or entry.get("role") != "assistant":
+          continue
+        if provider_has_own_usage_record(entry.get("providerID")):
           continue
         tokens = entry.get("tokens") or {}
         cache = tokens.get("cache") or {}
@@ -358,6 +387,70 @@ def scan_native_codex_sessions():
           add_usage(day, str(path), current_model, input_tokens, output_tokens, cache_read, cache_write)
     except Exception:
       continue
+
+
+def scan_zcode_sessions():
+  """Add ZCode rollouts to the shared machine dataset.
+
+  ZCode reports ``inputTokens`` inclusive of cached input: its
+  ``totalTokens`` equals input + output. Cache therefore has to be split out
+  before aggregation, otherwise both token volume and price count it twice.
+  """
+  rollout_dir = Path.home() / ".zcode" / "cli" / "rollout"
+  if not rollout_dir.is_dir():
+    return True
+
+  complete = True
+  for path in sorted(rollout_dir.glob("*.jsonl")):
+    try:
+      with path.open(encoding="utf-8", errors="replace") as handle:
+        for raw in handle:
+          lowered = raw.lower()
+          if "bigmodel" not in lowered and '"glm-' not in lowered:
+            continue
+          try:
+            entry = json.loads(raw)
+          except Exception:
+            continue
+
+          meta = entry.get("model") or {}
+          provider = str(meta.get("providerId") or "")
+          model = str(meta.get("modelId") or "")
+          if "bigmodel" not in provider.lower() and not model.lower().startswith("glm"):
+            continue
+
+          usage = (entry.get("response") or {}).get("usage") or {}
+          if not isinstance(usage, dict):
+            continue
+          cache_read = number(usage.get("cacheReadTokens"))
+          cache_write = number(usage.get("cacheWriteTokens"))
+          input_tokens = max(0, number(usage.get("inputTokens")) - cache_read - cache_write)
+          output_tokens = number(usage.get("outputTokens"))
+          if not (input_tokens or output_tokens or cache_read or cache_write):
+            continue
+
+          day = local_day(entry.get("completedAt") or path.stat().st_mtime)
+          session_id = str(entry.get("sessionId") or path)
+          turn_id = str(entry.get("turnId") or "")
+          if turn_id:
+            turn_key = "zcode:" + turn_id
+            if turn_key not in zcode_turns:
+              zcode_turns.add(turn_key)
+              turn_counts["total"] += 1
+              if day == today:
+                turn_counts["today"] += 1
+          add_usage(
+            day,
+            "zcode:" + session_id,
+            model_name(model or "glm"),
+            input_tokens,
+            output_tokens,
+            cache_read,
+            cache_write,
+          )
+    except OSError:
+      complete = False
+  return complete
 
 
 def decode_varint(buf, pos):
@@ -513,10 +606,14 @@ def scan_cache_paths():
   codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
   db = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")) / "opencode" / "opencode.db"
   agy_dir = Path.home() / ".gemini" / "antigravity-cli" / "conversations"
+  zcode_dir = Path.home() / ".zcode" / "cli" / "rollout"
   # The digest covers every data path the scan reads: the codex session
   # roots, the opencode DB, the agy conversation DBs, and (via Path.home())
   # the pi/omp session roots.
-  digest = hashlib.sha1((str(Path.home()) + "\n" + str(codex_home) + "\n" + str(db) + "\n" + str(agy_dir)).encode("utf-8")).hexdigest()[:16]
+  digest = hashlib.sha1(
+    (str(Path.home()) + "\n" + str(codex_home) + "\n" + str(db) + "\n"
+     + str(agy_dir) + "\n" + str(zcode_dir)).encode("utf-8")
+  ).hexdigest()[:16]
   root = cache_root()
   return root / f"codex-scan-{digest}.json", root / f"codex-scan-{digest}.lock"
 
@@ -559,7 +656,7 @@ def write_json(path, payload):
 # of a crash or a garbage record.
 def read_cached_stats(cache_file, max_age_seconds):
   cached = read_fresh_json(cache_file, max_age_seconds)
-  if not isinstance(cached, dict) or cached.get("schemaVersion") != 1:
+  if not isinstance(cached, dict) or cached.get("schemaVersion") != 2:
     return None
   # today* fields only mean "today" on the day they were scanned. A cache
   # from another local date (midnight passed, or the clock moved) is a miss,
@@ -576,82 +673,17 @@ def read_cached_stats(cache_file, max_age_seconds):
 
 def write_cached_stats(cache_file, stats):
   try:
-    write_json(cache_file, {"schemaVersion": 1, "scanDate": today, "stats": stats})
+    write_json(cache_file, {"schemaVersion": 2, "scanDate": today, "stats": stats})
   except Exception as exc:
     print(f"omarchy-agent-usage-codex: could not write usage cache ({exc})", file=sys.stderr)
 
 
-PRICING_CONFIG = Path.home() / ".config" / "omarchy" / "agents" / "pricing.json"
-
-DEFAULT_PRICING = {
-    "gemini-3.7-flash": {"input": 0.75, "output": 3.75, "cacheRead": 0.075, "cacheWrite": 0.0},
-    "gemini-3.7-flash-high": {"input": 0.75, "output": 3.75, "cacheRead": 0.075, "cacheWrite": 0.0},
-    "gemini-3.7-flash-control": {"input": 0.75, "output": 3.75, "cacheRead": 0.075, "cacheWrite": 0.0},
-    "gemini-3.7-flash-low": {"input": 0.75, "output": 3.75, "cacheRead": 0.075, "cacheWrite": 0.0},
-    "gemini-3.7-flash-medium": {"input": 0.75, "output": 3.75, "cacheRead": 0.075, "cacheWrite": 0.0},
-    "gemini-3.7-flash-tiered": {"input": 0.75, "output": 3.75, "cacheRead": 0.075, "cacheWrite": 0.0},
-    "gemini-3.1-pro-high": {"input": 1.25, "output": 5.00, "cacheRead": 0.3125, "cacheWrite": 0.0},
-    "gemini-3.1-pro-low": {"input": 1.25, "output": 5.00, "cacheRead": 0.3125, "cacheWrite": 0.0},
-    "gemini-2.5-pro": {"input": 1.25, "output": 5.00, "cacheRead": 0.3125, "cacheWrite": 0.0},
-    "gemini-2.5-flash": {"input": 0.10, "output": 0.40, "cacheRead": 0.025, "cacheWrite": 0.0},
-    "gemini-default": {"input": 0.75, "output": 3.75, "cacheRead": 0.075, "cacheWrite": 0.0},
-    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "cacheRead": 0.30, "cacheWrite": 3.75},
-    "claude-opus-4-6-thinking": {"input": 15.00, "output": 75.00, "cacheRead": 1.50, "cacheWrite": 18.75},
-    "deepseek-v4-flash": {"input": 0.22, "output": 0.66, "cacheRead": 0.014, "cacheWrite": 0.0},
-    "gpt-5.6-sol": {"input": 4.00, "output": 20.00, "cacheRead": 0.40, "cacheWrite": 0.0},
-    "gpt-5.6-luna": {"input": 0.20, "output": 1.20, "cacheRead": 0.02, "cacheWrite": 0.0},
-    "gpt-oss-120b-medium": {"input": 0.50, "output": 2.00, "cacheRead": 0.05, "cacheWrite": 0.0},
-    "qwen38-ridge": {"input": 0.40, "output": 1.60, "cacheRead": 0.04, "cacheWrite": 0.0},
-    "stealth/ox-alpha": {"input": 0.50, "output": 2.00, "cacheRead": 0.05, "cacheWrite": 0.0}
-}
-
-
-def load_pricing_rates():
-    if PRICING_CONFIG.is_file():
-        try:
-            data = json.loads(PRICING_CONFIG.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data.get("models", data)
-        except Exception:
-            pass
-    return DEFAULT_PRICING
-
-
-RATES = load_pricing_rates()
-
-
-def calculate_cost(model_id, input_tokens, output_tokens, cache_read, cache_write=0):
-    clean = str(model_id or "").lower().replace("//", "/")
-    rate = RATES.get(clean)
-    if not rate:
-        for k, v in RATES.items():
-            if k in clean:
-                rate = v
-                break
-    if not rate:
-        rate = {"input": 0.5, "output": 2.0, "cacheRead": 0.05, "cacheWrite": 0.0}
-    c_in = (input_tokens / 1_000_000.0) * float(rate.get("input", 0))
-    c_out = (output_tokens / 1_000_000.0) * float(rate.get("output", 0))
-    c_cr = (cache_read / 1_000_000.0) * float(rate.get("cacheRead", 0))
-    c_cw = (cache_write / 1_000_000.0) * float(rate.get("cacheWrite", 0))
-    return round(c_in + c_out + c_cr + c_cw, 4)
-
-
 def local_stats():
-  """Snapshot the aggregated local usage into the record's stats dict."""
-  today_total_cost = 0.0
-  for m, b in today_model_usage.items():
-      inp = int(b.get("inputTokens") or 0)
-      out = int(b.get("outputTokens") or 0)
-      cr = int(b.get("cacheReadInputTokens") or 0)
-      cw = int(b.get("cacheCreationInputTokens") or 0)
-      today_total_cost += calculate_cost(m, inp, out, cr, cw)
-
+  """Snapshot raw token facts; the panel owns the one pricing engine."""
   return {
     "todayPrompts": turn_counts["today"],
     "todaySessions": len(today_sessions),
     "todayTotalTokens": today_total_tokens,
-    "todayTotalCost": round(today_total_cost, 4),
     "todayTokensByModel": today_tokens_by_model,
     "todayModelUsage": today_model_usage,
     "recentDays": [recent[day] for day in recent_dates],
@@ -666,9 +698,10 @@ def local_stats():
 def run_local_scans():
   scan_pi_sessions()
   scan_native_codex_sessions()
+  zcode_complete = scan_zcode_sessions()
   opencode_complete = scan_opencode_sessions()
   agy_complete = scan_agy_sessions()
-  return local_stats(), (opencode_complete and agy_complete)
+  return local_stats(), (zcode_complete and opencode_complete and agy_complete)
 
 
 def cached_local_stats(max_age):
@@ -825,6 +858,7 @@ def main():
     "updatedAt": datetime.now(timezone.utc).isoformat(),
     "ready": True,
     "hasLocalStats": True,
+    "contributesUsage": True,
   }
   record.update(stats)
   record.update(rpc)

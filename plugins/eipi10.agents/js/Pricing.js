@@ -48,54 +48,97 @@ var DEFAULT_RATES = {
   "glm-5.3-flash": { input: 0.056, output: 0.194, cacheRead: 0.016, cacheWrite: 0.056 },
   "glm-5.3": { input: 1.11, output: 3.89, cacheRead: 0.28, cacheWrite: 1.11 },
 
-  // Qwen (Alibaba DashScope/Bailian official list price for Qwen3.8-27B:
-  // CNY 3 input / 12 output / 0.6 cache-hit / 3.75 cache-write per M tokens,
-  // converted at 7.2 CNY/USD — checked 2026-08-27. Self-hosted quants on
-  // office_server are rated at the same base-model API list price.)
-  "qwen38": { input: 0.42, output: 1.67, cacheRead: 0.083, cacheWrite: 0.52 },
-  "qwen38-q3kxl": { input: 0.42, output: 1.67, cacheRead: 0.083, cacheWrite: 0.52 },
-  "qwen38-iq3xxs": { input: 0.42, output: 1.67, cacheRead: 0.083, cacheWrite: 0.52 },
-  "qwen38-ridge": { input: 0.42, output: 1.67, cacheRead: 0.083, cacheWrite: 0.52 },
-  "qwen38-udq8-mtp-vlm": { input: 0.42, output: 1.67, cacheRead: 0.083, cacheWrite: 0.52 },
-  "qwen-2.5-coder": { input: 0.42, output: 1.67, cacheRead: 0.083, cacheWrite: 0.52 },
+  // Qwen (self-hosted office_server models have no per-token API charge)
+  "qwen38": { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 },
+  "qwen38-q3kxl": { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 },
+  "qwen38-iq3xxs": { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 },
+  "qwen38-ridge": { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 },
+  "qwen38-udq8-mtp-vlm": { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 },
+  "qwen-2.5-coder": { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 },
 
   // Free / Local
   "ox-alpha-free": { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 },
   "hy3-free": { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 }
 }
 
-function getModelRate(modelId, customRates) {
+function zeroRate() {
+  return { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 }
+}
+
+function nonNegativeNumber(value) {
+  var number = Number(value)
+  return isFinite(number) && number > 0 ? number : 0
+}
+
+function resolveModelRate(modelId, customRates) {
   var id = String(modelId || "").toLowerCase().trim()
-  if (customRates && customRates[id]) return customRates[id]
-  if (DEFAULT_RATES[id]) return DEFAULT_RATES[id]
+  if (customRates && customRates[id]) return { rate: customRates[id], rated: true }
+  if (DEFAULT_RATES[id]) return { rate: DEFAULT_RATES[id], rated: true }
 
-  if (id.indexOf("free") >= 0) return { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 }
-  if (id.indexOf("glm") >= 0 && id.indexOf("flash") >= 0) return DEFAULT_RATES["glm-5.3-flash"]
-  if (id.indexOf("glm") >= 0) return DEFAULT_RATES["glm-5.3"]
-  if (id.indexOf("qwen") >= 0) return DEFAULT_RATES["qwen38"]
-  if (id.indexOf("sol") >= 0) return DEFAULT_RATES["gpt-5.6-sol"]
-  if (id.indexOf("terra") >= 0) return DEFAULT_RATES["gpt-5.6-terra"]
-  if (id.indexOf("luna") >= 0) return DEFAULT_RATES["gpt-5.6-luna"]
-  if (id.indexOf("gemini") >= 0 && id.indexOf("3.7") >= 0) return DEFAULT_RATES["gemini-3.7-flash"]
-  if (id.indexOf("gemini") >= 0) return DEFAULT_RATES["gemini-2.5-flash"]
-  if (id.indexOf("deepseek") >= 0 && id.indexOf("pro") >= 0) return DEFAULT_RATES["deepseek-v4-pro"]
-  if (id.indexOf("deepseek") >= 0) return DEFAULT_RATES["deepseek-v4-flash"]
-  if (id.indexOf("sonnet") >= 0) return DEFAULT_RATES["claude-3-7-sonnet"]
-  if (id.indexOf("haiku") >= 0) return DEFAULT_RATES["claude-3-5-haiku"]
-  if (id.indexOf("opus") >= 0) return DEFAULT_RATES["claude-3-opus"]
-  if (id.indexOf("gpt") >= 0) return DEFAULT_RATES["gpt-5.6-sol"]
+  if (id.indexOf("free") >= 0) return { rate: zeroRate(), rated: true }
+  if (id.indexOf("glm-5.3") >= 0 && id.indexOf("flash") >= 0)
+    return { rate: DEFAULT_RATES["glm-5.3-flash"], rated: true }
+  if (id.indexOf("glm-5.3") >= 0)
+    return { rate: DEFAULT_RATES["glm-5.3"], rated: true }
+  if (id.indexOf("qwen38") >= 0 || id.indexOf("qwen-2.5-coder") >= 0)
+    return { rate: DEFAULT_RATES["qwen38"], rated: true }
+  if (id.indexOf("gpt-5.6") >= 0 && id.indexOf("sol") >= 0)
+    return { rate: DEFAULT_RATES["gpt-5.6-sol"], rated: true }
+  if (id.indexOf("gpt-5.6") >= 0 && id.indexOf("terra") >= 0)
+    return { rate: DEFAULT_RATES["gpt-5.6-terra"], rated: true }
+  if (id.indexOf("gpt-5.6") >= 0 && id.indexOf("luna") >= 0)
+    return { rate: DEFAULT_RATES["gpt-5.6-luna"], rated: true }
+  if (id.indexOf("gemini") >= 0 && id.indexOf("3.7") >= 0 && id.indexOf("flash") >= 0)
+    return { rate: DEFAULT_RATES["gemini-3.7-flash"], rated: true }
+  if (id.indexOf("gemini") >= 0 && id.indexOf("pro") >= 0)
+    return { rate: DEFAULT_RATES["gemini-2.5-pro"], rated: true }
+  if (id.indexOf("gemini") >= 0 && id.indexOf("flash") >= 0)
+    return { rate: DEFAULT_RATES["gemini-2.5-flash"], rated: true }
+  if (id.indexOf("deepseek") >= 0 && id.indexOf("pro") >= 0)
+    return { rate: DEFAULT_RATES["deepseek-v4-pro"], rated: true }
+  if (id.indexOf("deepseek") >= 0 && (id.indexOf("flash") >= 0 || id.indexOf("chat") >= 0))
+    return { rate: DEFAULT_RATES["deepseek-v4-flash"], rated: true }
+  if (id.indexOf("sonnet") >= 0)
+    return { rate: DEFAULT_RATES["claude-3-7-sonnet"], rated: true }
+  if (id.indexOf("haiku") >= 0)
+    return { rate: DEFAULT_RATES["claude-3-5-haiku"], rated: true }
+  if (id.indexOf("opus") >= 0)
+    return { rate: DEFAULT_RATES["claude-3-opus"], rated: true }
 
-  // Default fallback rate ($0.15 in / $0.60 out / $0.05 cache)
-  return { input: 0.15, output: 0.60, cacheRead: 0.05, cacheWrite: 0.0 }
+  // An unknown model is explicitly unrated. Inventing a fallback price makes
+  // the grand total look exact while silently charging an unrelated tariff.
+  return { rate: zeroRate(), rated: false }
+}
+
+function getModelRate(modelId, customRates) {
+  return resolveModelRate(modelId, customRates).rate
+}
+
+function isModelRated(modelId, customRates) {
+  return resolveModelRate(modelId, customRates).rated
+}
+
+function bucketTokenTotal(bucket) {
+  var b = bucket || {}
+  return nonNegativeNumber(b.inputTokens !== undefined ? b.inputTokens : b.input)
+    + nonNegativeNumber(b.outputTokens !== undefined ? b.outputTokens : b.output)
+    + nonNegativeNumber(b.cacheReadInputTokens !== undefined ? b.cacheReadInputTokens : b.cacheRead)
+    + nonNegativeNumber(b.cacheCreationInputTokens !== undefined ? b.cacheCreationInputTokens : b.cacheWrite)
+    + nonNegativeNumber(b.unclassifiedTokens)
 }
 
 function calculateCostBreakdown(bucket, rate) {
   var b = bucket || {}
-  var r = rate || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
-  var inCost = (Number(b.inputTokens || b.input || 0) / 1e6) * (r.input || 0)
-  var outCost = (Number(b.outputTokens || b.output || 0) / 1e6) * (r.output || 0)
-  var crCost = (Number(b.cacheReadInputTokens || b.cacheRead || 0) / 1e6) * (r.cacheRead || 0)
-  var cwCost = (Number(b.cacheCreationInputTokens || b.cacheWrite || 0) / 1e6) * (r.cacheWrite || 0)
+  var r = rate || zeroRate()
+  var input = nonNegativeNumber(b.inputTokens !== undefined ? b.inputTokens : b.input)
+  var output = nonNegativeNumber(b.outputTokens !== undefined ? b.outputTokens : b.output)
+  var cacheRead = nonNegativeNumber(b.cacheReadInputTokens !== undefined ? b.cacheReadInputTokens : b.cacheRead)
+  var cacheWrite = nonNegativeNumber(b.cacheCreationInputTokens !== undefined ? b.cacheCreationInputTokens : b.cacheWrite)
+  var unclassified = nonNegativeNumber(b.unclassifiedTokens)
+  var inCost = (input / 1e6) * nonNegativeNumber(r.input)
+  var outCost = (output / 1e6) * nonNegativeNumber(r.output)
+  var crCost = (cacheRead / 1e6) * nonNegativeNumber(r.cacheRead)
+  var cwCost = (cacheWrite / 1e6) * nonNegativeNumber(r.cacheWrite)
   var total = inCost + outCost + crCost + cwCost
   return {
     total: total,
@@ -103,13 +146,16 @@ function calculateCostBreakdown(bucket, rate) {
     outputCost: outCost,
     cacheReadCost: crCost,
     cacheWriteCost: cwCost,
+    unclassifiedTokens: unclassified,
     rate: r
   }
 }
 
 function calculateModelCost(modelId, bucket, customRates) {
-  var rate = getModelRate(modelId, customRates)
-  return calculateCostBreakdown(bucket, rate)
+  var resolved = resolveModelRate(modelId, customRates)
+  var breakdown = calculateCostBreakdown(bucket, resolved.rate)
+  breakdown.rated = resolved.rated
+  return breakdown
 }
 
 function calculateTotalCost(modelUsageMap, customRates) {

@@ -27,7 +27,7 @@ function normalizeModelId(id) {
   if (lower.indexOf("gemini-3.7-flash") >= 0 || lower.indexOf("gemini-3-7-flash") >= 0) {
     return "gemini-3.7-flash"
   }
-  return id
+  return lower
 }
 
 function friendlyModelName(id) {

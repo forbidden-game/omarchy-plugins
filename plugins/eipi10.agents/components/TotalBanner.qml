@@ -21,8 +21,9 @@ Column {
     ? Pricing.calculateTotalCost(root.aggregate.todayModelUsage || {}, root.customRates)
     : 0
   readonly property real totalTokens: root.aggregate ? Number(root.aggregate.todayTotalTokens || 0) : 0
+  readonly property real unratedTokens: root.aggregate ? Number(root.aggregate.todayUnratedTokens || 0) : 0
   readonly property int totalPrompts: root.aggregate ? Number(root.aggregate.todayPrompts || 0) : 0
-  readonly property int agentCount: root.aggregate && root.aggregate.agents ? root.aggregate.agents.length : 0
+  readonly property int agentCount: root.aggregate ? Number(root.aggregate.agentCount || 0) : 0
 
   visible: root.aggregate !== null && (root.totalTokens > 0 || root.totalCost > 0)
   width: parent ? parent.width : 0
@@ -55,7 +56,12 @@ Column {
 
   Text {
     width: parent.width
-    text: root.agentCount + " agents · " + Format.formatTokenCount(root.totalTokens) + " tokens · " + root.totalPrompts + " prompts"
+    text: {
+      var value = root.agentCount + " agents · " + Format.formatTokenCount(root.totalTokens)
+        + " tokens · " + root.totalPrompts + " prompts"
+      if (root.unratedTokens > 0) value += " · " + Format.formatTokenCount(root.unratedTokens) + " unrated"
+      return value
+    }
     color: root.dim
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption

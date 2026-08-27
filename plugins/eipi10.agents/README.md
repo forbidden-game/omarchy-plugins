@@ -18,8 +18,8 @@ cross-device aggregation); `Agent.qml` is the per-record file watcher.
 - **Balance** — prepaid agents report a credit ledger instead of limits:
   remaining credit, a fuel-gauge meter that drains toward empty, and
   funded-versus-spent detail.
-- **All agents banner** — the top line sums every enabled agent: today's
-  spend rated at API list prices, plus the token and prompt counts behind it.
+- **All agents banner** — the top line shows today's unified machine usage:
+  rated spend plus the exact token and prompt counts behind it.
 - **Tokens by day** — one row per day for the last week across all agents:
   day, bar, tokens, with today bolded at the bottom. Hover today for its
   prompt and session count.
@@ -27,7 +27,8 @@ cross-device aggregation); `Agent.qml` is the per-record file watcher.
   token consumer first, each row tagged with the subscription that ran it.
   Hover a row for the input / output / cache split and the rates applied.
   Rates live in `js/Pricing.js` with their official sources and the date
-  they were checked.
+  they were checked. Tokens from a legacy record without that split remain
+  in the total as `unrated`; they never receive an invented fallback price.
 
 A subscription appears only when it is enabled in settings and has actually
 recorded usage — on this machine or on a synced one. With one such agent
@@ -55,18 +56,23 @@ with an `assets/<id>-light.svg` twin if the mark needs a dark variant for
 light surfaces — and the bar glyph stands in when there is none.
 
 Prompts are counted as agent turns, not model calls: one message that fans
-out into a dozen tool-loop calls is still one prompt. GLM dedupes `turnId`
-from ZCode's rollout logs; the Codex readers count one `turn_context` per
-task in the CLI session files. Usage events from sources without turn
-markers contribute tokens only, never prompts.
+out into a dozen tool-loop calls is still one prompt. The shared machine
+collector dedupes `turnId` from ZCode's rollout logs and counts one
+`turn_context` per task in native Codex session files. Usage events from
+sources without turn markers contribute tokens only, never prompts.
+
+Transcript usage has one owner: the Codex record is the unified machine
+dataset for Codex, ZCode, pi/omp, opencode, and agy sessions, except rows
+already owned by Claude or Fireworks. Antigravity contributes only its
+subscription/account state. This separation is what keeps provider tabs from
+multiplying the same local tokens and price.
 
 | Collector | Limits | Local stats |
 |---|---|---|
 | `claude` | Anthropic's OAuth usage endpoint (5-hour session + 7-day weekly) | `~/.claude/projects` transcripts, opencode sessions on an Anthropic provider, plus `stats-cache.json` and `history.jsonl` as fallback |
-| `codex` | The Codex app-server RPC | native Codex CLI session files (plus pi and opencode sessions) |
-| `antigravity` | Google Cloud Code API (5-hour session + 7-day weekly per model group) & standalone multi-account switching with OAuth | native Codex CLI, pi/omp, opencode, and Antigravity (agy) session transcripts & SQLite token stats |
+| `codex` | The Codex app-server RPC | unified machine usage from native Codex, ZCode, pi/omp, opencode, and Antigravity (agy) sessions |
+| `antigravity` | Google Cloud Code API (5-hour session + 7-day weekly per model group) & standalone multi-account switching with OAuth | — (subscription state only; usage is already in the unified machine dataset) |
 | `fireworks` | Estimated prepaid balance: configured funding minus rated account costs | Fireworks billing API, grouped by day and model for the last 30 days |
-| `glm` | — (none yet; see below) | ZCode model I/O session logs, token-accounted per day and per model |
 
 ### Antigravity streaming proxy
 
@@ -105,33 +111,6 @@ falls back to local stats only. A non-default Claude directory is honored via
 `~/.fireworks/auth.ini` (which `firectl set-api-key` creates), then the key
 opencode stores in `~/.local/share/opencode/auth.json` when Fireworks is
 signed in there.
-
-### GLM Coding Plan
-
-The GLM tab counts what this machine's ZCode client actually sent: every
-model call logged under `~/.zcode/cli/rollout/` whose provider is a BigModel
-coding plan is token-accounted (`input + output + cache read/write`, matching
-the Codex collector's convention) and rolled up into today, the last week,
-and per-model totals. Plan entitlement comes from ZCode's own cache at
-`~/.zcode/v2/coding-plan-cache.json`; when it reports the plan unavailable
-the tab says so and keeps drawing local stats.
-
-Live quota comes from a plain BigModel API key. Put it in
-`~/.config/omarchy/agents/glm.json` (mode 600, never in this repository):
-
-```json
-{"apiKey": "your-key.id.secret"}
-```
-
-or export `GLM_API_KEY` / `BIGMODEL_API_KEY` / `ZHIPU_API_KEY`. The collector
-then asks `open.bigmodel.cn` for the subscription name
-(`/api/biz/subscription/list`) and the credit windows
-(`/api/monitor/usage/quota/limit` — the 5-hour session window and the weekly
-window), which render as the tab's limit meters. ZCode's own OAuth token is
-encrypted at rest (`enc:v1` in `~/.zcode/v2/credentials.json`) and is not
-used. Totals cover only the rollout logs still on disk — ZCode prunes old
-sessions, so "all-time" means "everything ZCode kept", mirroring the Codex
-window caveat.
 
 ### Fireworks balance
 
@@ -213,7 +192,7 @@ when its stats are account-global rather than machine-local (Fireworks'
 billing API); those merge by taking the widest value instead of summing, so
 the same account synced from two machines is not counted twice.
 
-One caveat on "all-time": the Codex collector only reads native session files
-touched in the last 30 days, and Fireworks requests the last 30 days from its
-billing API, so their totals and day counts cover that window. Claude's cover
-every transcript still on disk.
+One caveat on "all-time": the unified collector only reads native Codex and
+agy session files touched in the last 30 days; ZCode totals cover the rollout
+logs still on disk. Fireworks requests the last 30 days from its billing API.
+Claude's totals cover every transcript still on disk.

@@ -41,14 +41,21 @@ Column {
     var normalizedModels = {}
     for (var m in day.models) {
       var entry = day.models[m] || {}
-      var tokens = Number(entry.tokens || 0)
+      var bucketTokens = Pricing.bucketTokenTotal(entry)
+      var tokens = bucketTokens > 0 ? bucketTokens : Number(entry.tokens || 0)
       if (tokens <= 0) continue
+      var breakdown = bucketTokens > 0 ? Pricing.calculateModelCost(m, entry, root.customRates) : null
+      var cost = breakdown ? breakdown.total : Number(entry.cost || 0)
+      var unrated = breakdown
+        ? (breakdown.rated ? Number(entry.unclassifiedTokens || 0) : tokens)
+        : 0
       var normId = Format.normalizeModelId(m)
       if (!normalizedModels[normId]) {
-        normalizedModels[normId] = { tokens: 0, cost: 0.0 }
+        normalizedModels[normId] = { tokens: 0, cost: 0.0, unratedTokens: 0 }
       }
       normalizedModels[normId].tokens += tokens
-      normalizedModels[normId].cost += Number(entry.cost || 0)
+      normalizedModels[normId].cost += cost
+      normalizedModels[normId].unratedTokens += unrated
     }
 
     var list = []
@@ -61,12 +68,20 @@ Column {
           tokens: nEntry.tokens,
           fraction: nEntry.tokens / totalTokens,
           cost: Number(nEntry.cost || 0),
+          unratedTokens: Number(nEntry.unratedTokens || 0),
           color: ModelIcons.getModelColor(nm, Color)
         })
       }
     }
     list.sort(function(a, b) { return b.tokens - a.tokens })
     return list
+  }
+
+  function dayCost(day) {
+    var slices = daySlices(day)
+    var total = 0
+    for (var i = 0; i < slices.length; i++) total += Number(slices[i].cost || 0)
+    return slices.length > 0 ? total : Number(day ? day.totalCost || 0 : 0)
   }
 
   function dayTooltip(day, isToday) {
@@ -76,7 +91,7 @@ Column {
       ? String(day.date)
       : Format.dayName(day.date) + " " + (parsed.getMonth() + 1) + "/" + parsed.getDate()
     var count = Number(day.messageCount || 0)
-    var cost = Number(day.totalCost || 0)
+    var cost = dayCost(day)
 
     var text = label + " · " + Format.formatTokenCount(count) + " tokens"
     if (cost > 0) text += " (" + Pricing.formatMoney(cost) + ")"
@@ -90,6 +105,7 @@ Column {
         text += "\n" + (i + 1) + ". " + s.name + ": "
           + Format.formatTokenCount(s.tokens) + " (" + pct + "%)"
         if (s.cost > 0) text += " → " + Pricing.formatMoney(s.cost)
+        if (s.unratedTokens > 0) text += " · " + Format.formatTokenCount(s.unratedTokens) + " unrated"
       }
     }
 
@@ -208,7 +224,7 @@ Column {
         id: dayValue
         text: {
           var count = Format.formatTokenCount(dayRow.modelData ? Number(dayRow.modelData.messageCount || 0) : 0)
-          var cost = Number(dayRow.modelData ? dayRow.modelData.totalCost || 0 : 0)
+          var cost = root.dayCost(dayRow.modelData)
           return cost > 0 ? count + " (" + Pricing.formatMoney(cost) + ")" : count
         }
         color: dayRow.isToday ? root.foreground : root.dim

@@ -32,7 +32,10 @@ Item {
   function parsePricing(content) {
     try {
       var parsed = JSON.parse(String(content || ""))
-      root.customRates = parsed && typeof parsed === "object" ? (parsed.models || parsed) : ({})
+      var source = parsed && typeof parsed === "object" ? (parsed.models || parsed) : ({})
+      var normalized = {}
+      for (var modelId in source) normalized[String(modelId).toLowerCase().trim()] = source[modelId]
+      root.customRates = normalized
       root.dataRevision++
     } catch (e) {
       root.customRates = ({})
@@ -234,6 +237,9 @@ Item {
   }
 
   function providerEnabled(id) {
+    // Removed providers stay removed even if an old synced snapshot or stale
+    // local record still contains them.
+    if (String(id) === "glm") return false
     if (!settings || !settings.providers || !settings.providers[id]) return true
     return settings.providers[id].enabled !== false
   }
@@ -263,10 +269,60 @@ Item {
     }
   }
 
+  function tokenMapTotal(map) {
+    var total = 0
+    for (var modelId in map) total += Pricing.bucketTokenTotal(map[modelId])
+    return total
+  }
+
+  function completeTodayUsage(stats, providerId) {
+    var result = {}
+    var detailed = stats.todayModelUsage || {}
+    for (var rawId in detailed) {
+      var normalizedId = Format.normalizeModelId(rawId)
+      var source = detailed[rawId] || {}
+      var bucket = result[normalizedId]
+      if (!bucket) bucket = result[normalizedId] = emptyTokenBucket()
+      bucket.inputTokens += numberValue(source.inputTokens)
+      bucket.outputTokens += numberValue(source.outputTokens)
+      bucket.cacheReadInputTokens += numberValue(source.cacheReadInputTokens)
+      bucket.cacheCreationInputTokens += numberValue(source.cacheCreationInputTokens)
+      bucket.unclassifiedTokens += numberValue(source.unclassifiedTokens)
+    }
+
+    // Older provider records expose today's total per model but not its
+    // input/output/cache split. Keep those tokens visible and explicitly
+    // unrated instead of dropping them or inventing a category and price.
+    var byModel = stats.todayTokensByModel || {}
+    var normalizedTodayTotals = {}
+    for (var rawTodayId in byModel) {
+      var todayId = Format.normalizeModelId(rawTodayId)
+      normalizedTodayTotals[todayId] = numberValue(normalizedTodayTotals[todayId])
+        + numberValue(byModel[rawTodayId])
+    }
+    for (var normalizedTodayId in normalizedTodayTotals) {
+      var todayBucket = result[normalizedTodayId]
+      if (!todayBucket) todayBucket = result[normalizedTodayId] = emptyTokenBucket()
+      var missing = normalizedTodayTotals[normalizedTodayId] - Pricing.bucketTokenTotal(todayBucket)
+      if (missing > 0) todayBucket.unclassifiedTokens += missing
+    }
+
+    var remaining = numberValue(stats.todayTotalTokens) - tokenMapTotal(result)
+    if (remaining > 0) {
+      var fallbackId = String(providerId || "unknown") + "/unclassified"
+      var fallback = result[fallbackId]
+      if (!fallback) fallback = result[fallbackId] = emptyTokenBucket()
+      fallback.unclassifiedTokens += remaining
+    }
+    return result
+  }
+
   function displayProvider(record) {
     var stats = syncedStatsFor(String(record.id))
     var synced = !!stats
     var deviceCount = synced ? Number(stats.deviceCount || aggregateData.deviceCount || 0) : 0
+    var usageStats = synced ? stats : record
+    var todayUsage = completeTodayUsage(usageStats, record.id)
 
     return {
       providerId: String(record.id),
@@ -302,20 +358,22 @@ Item {
       currentAccountId: String(record.currentAccountId || ""),
       currentAccountEmail: String(record.currentAccountEmail || ""),
       accounts: Array.isArray(record.accounts) ? record.accounts : [],
-      todayTotalCost: Number(record.todayTotalCost || 0),
+      todayTotalCost: Pricing.calculateTotalCost(todayUsage, root.customRates),
+      contributesUsage: usageStats.contributesUsage !== false,
 
-      todayPrompts: synced ? numberValue(stats.todayPrompts) : numberValue(record.todayPrompts),
-      todaySessions: synced ? numberValue(stats.todaySessions) : numberValue(record.todaySessions),
-      todayTotalTokens: synced ? numberValue(stats.todayTotalTokens) : numberValue(record.todayTotalTokens),
-      todayTokensByModel: synced ? (stats.todayTokensByModel || ({})) : (record.todayTokensByModel || ({})),
-      todayModelUsage: synced ? (stats.todayModelUsage || ({})) : (record.todayModelUsage || ({})),
-      recentDays: synced ? (stats.recentDays || []) : (record.recentDays || []),
-      totalPrompts: synced ? numberValue(stats.totalPrompts) : numberValue(record.totalPrompts),
-      totalSessions: synced ? numberValue(stats.totalSessions) : numberValue(record.totalSessions),
-      activeDays: synced ? numberValue(stats.activeDays) : numberValue(record.activeDays),
-      modelUsage: synced ? (stats.modelUsage || ({})) : (record.modelUsage || ({})),
-      hasLocalStats: synced ? (stats.hasLocalStats !== false) : (record.hasLocalStats !== false),
-      hasPromptStats: synced ? (stats.hasPromptStats !== false) : (record.hasPromptStats !== false),
+      todayPrompts: numberValue(usageStats.todayPrompts),
+      todaySessions: numberValue(usageStats.todaySessions),
+      todayTotalTokens: tokenMapTotal(todayUsage),
+      todayTokensByModel: usageStats.todayTokensByModel || ({}),
+      todayModelUsage: todayUsage,
+      recentDays: usageStats.recentDays || [],
+      totalPrompts: numberValue(usageStats.totalPrompts),
+      totalSessions: numberValue(usageStats.totalSessions),
+      activeDays: numberValue(usageStats.activeDays),
+      activeDates: usageStats.activeDates || [],
+      modelUsage: usageStats.modelUsage || ({}),
+      hasLocalStats: usageStats.hasLocalStats !== false,
+      hasPromptStats: usageStats.hasPromptStats !== false,
 
       syncEnabled: synced,
       syncDeviceCount: deviceCount,
@@ -323,40 +381,53 @@ Item {
     }
   }
 
-  // Unified cross-agent view for the shared sections (tokens by day, tokens
-  // & cost by model): every enabled agent's numbers summed into one record,
-  // so a subscription added anywhere shows up in the totals on every tab.
+  // Unified machine view for the shared sections. Records that only expose a
+  // subscription or quota set contributesUsage=false, so their provider tab
+  // stays visible without multiplying the authoritative transcript dataset.
   readonly property var aggregateProvider: {
     var pList = enabledProviders
     if (pList.length === 0) return null
     var dayMap = {}
     var modelMap = {}
     var todayModelMap = {}
-    var todayByModelMap = {}
     var todayModelOwners = ({})
     var dateSet = {}
-    var todayPrompts = 0, todaySessions = 0, todayTotalTokens = 0, todayTotalCost = 0
+    var todayPrompts = 0, todaySessions = 0
     var totalPrompts = 0, totalSessions = 0
     var hasStats = false
 
     function mergeModelMap(dst, src) {
       for (var model in src) {
         var from = src[model] || {}
-        var to = dst[model]
-        if (!to) to = dst[model] = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 }
+        var normalizedModel = Format.normalizeModelId(model)
+        var to = dst[normalizedModel]
+        if (!to) to = dst[normalizedModel] = emptyTokenBucket()
         to.inputTokens += numberValue(from.inputTokens)
         to.outputTokens += numberValue(from.outputTokens)
         to.cacheReadInputTokens += numberValue(from.cacheReadInputTokens)
         to.cacheCreationInputTokens += numberValue(from.cacheCreationInputTokens)
+        to.unclassifiedTokens += numberValue(from.unclassifiedTokens)
+      }
+    }
+
+    function mergeDayModels(dst, src) {
+      for (var model in src) {
+        var from = src[model] || {}
+        var to = dst[model]
+        if (!to) to = dst[model] = emptyTokenBucket()
+        to.inputTokens += numberValue(from.inputTokens)
+        to.outputTokens += numberValue(from.outputTokens)
+        to.cacheReadInputTokens += numberValue(from.cacheReadInputTokens)
+        to.cacheCreationInputTokens += numberValue(from.cacheCreationInputTokens)
+        to.unclassifiedTokens += numberValue(from.unclassifiedTokens)
       }
     }
 
     for (var i = 0; i < pList.length; i++) {
       var p = pList[i]
+      if (p.contributesUsage === false) continue
       todayPrompts += numberValue(p.todayPrompts)
       todaySessions += numberValue(p.todaySessions)
-      todayTotalTokens += numberValue(p.todayTotalTokens)
-      todayTotalCost += numberValue(p.todayTotalCost)
       totalPrompts += numberValue(p.totalPrompts)
       totalSessions += numberValue(p.totalSessions)
 
@@ -365,8 +436,18 @@ Item {
         var row = days[d]
         if (!row || !row.date) continue
         var cell = dayMap[row.date]
-        if (!cell) cell = dayMap[row.date] = { date: String(row.date), messageCount: 0 }
+        if (!cell) cell = dayMap[row.date] = { date: String(row.date), messageCount: 0, models: {} }
         cell.messageCount += numberValue(row.messageCount)
+        var rowModels = row.models || {}
+        var detailedDayTokens = tokenMapTotal(rowModels)
+        mergeDayModels(cell.models, rowModels)
+        var unclassifiedDayTokens = numberValue(row.messageCount) - detailedDayTokens
+        if (unclassifiedDayTokens > 0) {
+          var dayFallbackId = String(p.providerId || "unknown") + "/unclassified"
+          var dayFallback = cell.models[dayFallbackId]
+          if (!dayFallback) dayFallback = cell.models[dayFallbackId] = emptyTokenBucket()
+          dayFallback.unclassifiedTokens += unclassifiedDayTokens
+        }
       }
 
       mergeModelMap(modelMap, p.modelUsage || {})
@@ -374,12 +455,10 @@ Item {
 
       var todaySrc = p.todayModelUsage || {}
       for (var ownerId in todaySrc) {
-        if (!todayModelOwners[ownerId]) todayModelOwners[ownerId] = p.providerName
-        else if (todayModelOwners[ownerId].indexOf(p.providerName) < 0) todayModelOwners[ownerId] += " / " + p.providerName
+        var normalizedOwnerId = Format.normalizeModelId(ownerId)
+        if (!todayModelOwners[normalizedOwnerId]) todayModelOwners[normalizedOwnerId] = p.providerName
+        else if (todayModelOwners[normalizedOwnerId].indexOf(p.providerName) < 0) todayModelOwners[normalizedOwnerId] += " / " + p.providerName
       }
-
-      var byModel = p.todayTokensByModel || {}
-      for (var model in byModel) todayByModelMap[model] = (todayByModelMap[model] || 0) + numberValue(byModel[model])
 
       var activeDates = Array.isArray(p.activeDates) ? p.activeDates : []
       for (var a = 0; a < activeDates.length; a++) dateSet[String(activeDates[a])] = true
@@ -396,24 +475,19 @@ Item {
     for (var dateKey in dateSet) activeDates.push(dateKey)
     activeDates.sort()
 
-    // Per-agent snapshots so the panel can also break the totals down by
-    // subscription instead of only showing one merged model list.
-    var agents = []
-    for (var j = 0; j < pList.length; j++) {
-      var pa = pList[j]
-      if (pa.hasLocalStats === false && numberValue(pa.todayTotalTokens) === 0) continue
-      agents.push({
-        providerId: pa.providerId,
-        providerName: pa.providerName,
-        todayModelUsage: pa.todayModelUsage || {},
-        modelUsage: pa.modelUsage || {},
-        todayTotalTokens: numberValue(pa.todayTotalTokens),
-        todayTotalCost: numberValue(pa.todayTotalCost),
-        todayPrompts: numberValue(pa.todayPrompts),
-        todaySessions: numberValue(pa.todaySessions)
-      })
+    var todayTotalTokens = 0
+    var todayUnratedTokens = 0
+    var normalizedTodayByModel = {}
+    for (var todayModelId in todayModelMap) {
+      var modelTokens = Pricing.bucketTokenTotal(todayModelMap[todayModelId])
+      var modelCost = Pricing.calculateModelCost(todayModelId, todayModelMap[todayModelId], root.customRates)
+      todayTotalTokens += modelTokens
+      todayUnratedTokens += modelCost.rated
+        ? numberValue(todayModelMap[todayModelId].unclassifiedTokens)
+        : modelTokens
+      normalizedTodayByModel[todayModelId] = modelTokens
     }
-    agents.sort(function(a, b) { return b.todayTotalTokens - a.todayTotalTokens })
+    var todayTotalCost = Pricing.calculateTotalCost(todayModelMap, root.customRates)
 
     return {
       providerId: "aggregate",
@@ -430,8 +504,9 @@ Item {
       todayPrompts: todayPrompts,
       todaySessions: todaySessions,
       todayTotalTokens: todayTotalTokens,
+      todayUnratedTokens: todayUnratedTokens,
       todayTotalCost: todayTotalCost,
-      todayTokensByModel: todayByModelMap,
+      todayTokensByModel: normalizedTodayByModel,
       todayModelUsage: todayModelMap,
       todayModelOwners: todayModelOwners,
       recentDays: recentDays,
@@ -440,7 +515,7 @@ Item {
       activeDays: activeDates.length,
       activeDates: activeDates,
       modelUsage: modelMap,
-      agents: agents,
+      agentCount: pList.length,
       hasLocalStats: hasStats,
       hasPromptStats: true,
       syncEnabled: false,
@@ -705,7 +780,13 @@ Item {
   }
 
   function emptyTokenBucket() {
-    return { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 }
+    return {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      unclassifiedTokens: 0
+    }
   }
 
   // Device-scoped stats add up across machines; account-scoped stats
@@ -729,18 +810,25 @@ Item {
     function providerAcc(id) {
       if (providers[id]) return providers[id]
       var recentByDay = {}
-      for (var d = 0; d < dates.length; d++) recentByDay[dates[d]] = 0
+      var recentModelsByDay = {}
+      for (var d = 0; d < dates.length; d++) {
+        recentByDay[dates[d]] = 0
+        recentModelsByDay[dates[d]] = ({})
+      }
       providers[id] = {
         providerId: id,
         providerName: "",
         ready: false,
         hasLocalStats: false,
         hasPromptStats: false,
+        contributesUsage: true,
         todayPrompts: 0,
         todaySessions: 0,
         todayTotalTokens: 0,
         todayTokensByModel: ({}),
+        todayModelUsage: ({}),
         recentByDay: recentByDay,
+        recentModelsByDay: recentModelsByDay,
         totalPrompts: 0,
         totalSessions: 0,
         activeDays: 0,
@@ -766,6 +854,7 @@ Item {
         // Snapshots from before the field existed only came from agents that
         // count prompts, so a missing value reads as true.
         acc.hasPromptStats = acc.hasPromptStats || stats.hasPromptStats !== false
+        acc.contributesUsage = acc.contributesUsage && stats.contributesUsage !== false
         var additive = String(stats.scope || "device") !== "account"
         acc.todayPrompts = combineNumber(additive, acc.todayPrompts, stats.todayPrompts)
         acc.todaySessions = combineNumber(additive, acc.todaySessions, stats.todaySessions)
@@ -784,12 +873,28 @@ Item {
           acc.todayTokensByModel[normTModel] = combineNumber(additive, acc.todayTokensByModel[normTModel], todayTokens[tModel])
         }
 
+        var todayUsage = stats.todayModelUsage || {}
+        for (var todayModelId in todayUsage) {
+          var normTodayModelId = Format.normalizeModelId(todayModelId)
+          var todayBucket = acc.todayModelUsage[normTodayModelId]
+          if (!todayBucket) todayBucket = acc.todayModelUsage[normTodayModelId] = emptyTokenBucket()
+          combineObjectNumbers(additive, todayBucket, todayUsage[todayModelId] || {})
+        }
+
         var recent = Array.isArray(stats.recentDays) ? stats.recentDays : []
         for (var r = 0; r < recent.length; r++) {
           var day = recent[r] || {}
           var date = String(day.date || "")
-          if (acc.recentByDay[date] !== undefined)
+          if (acc.recentByDay[date] !== undefined) {
             acc.recentByDay[date] = combineNumber(additive, acc.recentByDay[date], day.messageCount)
+            var dayModels = day.models || {}
+            for (var dayModelId in dayModels) {
+              var normDayModelId = Format.normalizeModelId(dayModelId)
+              var dayBucket = acc.recentModelsByDay[date][normDayModelId]
+              if (!dayBucket) dayBucket = acc.recentModelsByDay[date][normDayModelId] = emptyTokenBucket()
+              combineObjectNumbers(additive, dayBucket, dayModels[dayModelId] || {})
+            }
+          }
         }
 
         var usage = stats.modelUsage || {}
@@ -806,7 +911,13 @@ Item {
     for (var id in providers) {
       var acc = providers[id]
       var recentDays = []
-      for (var di = 0; di < dates.length; di++) recentDays.push({ date: dates[di], messageCount: acc.recentByDay[dates[di]] || 0 })
+      for (var di = 0; di < dates.length; di++) {
+        recentDays.push({
+          date: dates[di],
+          messageCount: acc.recentByDay[dates[di]] || 0,
+          models: acc.recentModelsByDay[dates[di]] || {}
+        })
+      }
       var providerDevices = Object.keys(acc.devices).sort()
       outProviders[id] = {
         providerId: acc.providerId,
@@ -814,10 +925,12 @@ Item {
         ready: acc.ready || providerDevices.length > 0,
         hasLocalStats: acc.hasLocalStats,
         hasPromptStats: acc.hasPromptStats,
+        contributesUsage: acc.contributesUsage,
         todayPrompts: acc.todayPrompts,
         todaySessions: acc.todaySessions,
         todayTotalTokens: acc.todayTotalTokens,
         todayTokensByModel: acc.todayTokensByModel,
+        todayModelUsage: acc.todayModelUsage,
         recentDays: recentDays,
         totalPrompts: acc.totalPrompts,
         totalSessions: acc.totalSessions,
@@ -847,11 +960,13 @@ Item {
       ready: record.ready === true,
       hasLocalStats: record.hasLocalStats !== false,
       hasPromptStats: record.hasPromptStats !== false,
+      contributesUsage: record.contributesUsage !== false,
       scope: String(record.scope || "device"),
       todayPrompts: numberValue(record.todayPrompts),
       todaySessions: numberValue(record.todaySessions),
       todayTotalTokens: numberValue(record.todayTotalTokens),
       todayTokensByModel: cloneValue(record.todayTokensByModel, ({})),
+      todayModelUsage: cloneValue(record.todayModelUsage, ({})),
       recentDays: cloneValue(record.recentDays, []),
       totalPrompts: numberValue(record.totalPrompts),
       totalSessions: numberValue(record.totalSessions),

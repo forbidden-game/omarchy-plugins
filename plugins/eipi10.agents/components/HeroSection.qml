@@ -25,11 +25,12 @@ Item {
 
   readonly property var activeSource: root.provider
   readonly property var todayUsage: activeSource ? (activeSource.todayModelUsage || {}) : {}
-  readonly property real todayCost: {
-    if (activeSource && activeSource.todayTotalCost > 0) return Number(activeSource.todayTotalCost)
-    return Pricing.calculateTotalCost(root.todayUsage, root.customRates)
+  readonly property real todayCost: Pricing.calculateTotalCost(root.todayUsage, root.customRates)
+  readonly property real todayTokens: {
+    var total = 0
+    for (var modelId in root.todayUsage) total += Pricing.bucketTokenTotal(root.todayUsage[modelId])
+    return total
   }
-  readonly property real todayTokens: activeSource ? Number(activeSource.todayTotalTokens || 0) : 0
 
   width: parent ? parent.width : 0
   implicitHeight: Math.max(leftBlock.implicitHeight, rightBlock.implicitHeight)

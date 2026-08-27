@@ -17,9 +17,7 @@ Column {
   function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
 
   function bucketTotal(bucket) {
-    var b = bucket || {}
-    return Number(b.inputTokens || b.input || 0) + Number(b.outputTokens || b.output || 0)
-      + Number(b.cacheReadInputTokens || b.cacheRead || 0) + Number(b.cacheCreationInputTokens || b.cacheWrite || 0)
+    return Pricing.bucketTokenTotal(bucket)
   }
 
   readonly property var tableData: {
@@ -47,13 +45,15 @@ Column {
           inputTokens: 0,
           outputTokens: 0,
           cacheReadInputTokens: 0,
-          cacheCreationInputTokens: 0
+          cacheCreationInputTokens: 0,
+          unclassifiedTokens: 0
         }
       }
       normalizedBuckets[normId].inputTokens += Number(bucket.inputTokens || bucket.input || 0)
       normalizedBuckets[normId].outputTokens += Number(bucket.outputTokens || bucket.output || 0)
       normalizedBuckets[normId].cacheReadInputTokens += Number(bucket.cacheReadInputTokens || bucket.cacheRead || 0)
       normalizedBuckets[normId].cacheCreationInputTokens += Number(bucket.cacheCreationInputTokens || bucket.cacheWrite || 0)
+      normalizedBuckets[normId].unclassifiedTokens += Number(bucket.unclassifiedTokens || 0)
       if (owners[rawId] && normalizedOwners[normId] !== undefined) {
         if (normalizedOwners[normId].indexOf(owners[rawId]) < 0) normalizedOwners[normId] += " / " + owners[rawId]
       } else if (owners[rawId]) {
@@ -78,7 +78,9 @@ Column {
         output: Number(nBucket.outputTokens),
         cacheRead: Number(nBucket.cacheReadInputTokens),
         cacheWrite: Number(nBucket.cacheCreationInputTokens),
+        unclassified: Number(nBucket.unclassifiedTokens),
         cost: costBreakdown.total,
+        rated: costBreakdown.rated,
         costBreakdown: costBreakdown
       })
     }
@@ -114,6 +116,12 @@ Column {
       + "• Cache Read: " + Format.formatTokenCount(row.cacheRead) + " (" + Pricing.formatMoney(cb.cacheReadCost) + " @ $" + (rate.cacheRead || 0) + "/M)"
     if (row.cacheWrite > 0) {
       text += "\n• Cache Write: " + Format.formatTokenCount(row.cacheWrite) + " (" + Pricing.formatMoney(cb.cacheWriteCost) + " @ $" + (rate.cacheWrite || 0) + "/M)"
+    }
+    if (row.unclassified > 0) {
+      text += "\n• Unclassified: " + Format.formatTokenCount(row.unclassified) + " (unrated)"
+    }
+    if (row.rated === false) {
+      text += "\n• Pricing: no configured rate (unrated)"
     }
     text += "\n• KV Cache Hit Rate: " + hitRateStr
     text += "\n────────────────────────\nTotal: " + Format.formatTokenCount(row.total) + " tokens (" + row.sharePct + ") → " + Pricing.formatMoney(row.cost)
@@ -242,7 +250,9 @@ Column {
             text: {
               if (!modelRow.modelData) return ""
               var countStr = Format.formatTokenCount(modelRow.modelData.total)
-              var costStr = Pricing.formatMoney(modelRow.modelData.cost)
+              var costStr = modelRow.modelData.rated === false
+                ? "unrated"
+                : Pricing.formatMoney(modelRow.modelData.cost)
               return countStr + " (" + costStr + ")"
             }
             color: root.foreground

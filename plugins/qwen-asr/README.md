@@ -25,6 +25,15 @@ material is never placed in QML, command-line arguments, transcript history,
 or diagnostics. Runtime state and the Unix socket are private to the desktop
 user.
 
+Every transcription session includes a short, static recognition profile for
+mainland-Chinese names, places, organizations, and current expressions, plus
+Chinese-English software-development terminology. It asks the provider to
+preserve standard English spelling, capitalization, and abbreviations while
+limiting edits to contextual punctuation, sentence boundaries, and word order.
+Caller-provided cursor context is appended to this profile rather than
+replacing it. The profile contains no clipboard, document, account, or device
+data.
+
 ## Installation
 
 ```bash

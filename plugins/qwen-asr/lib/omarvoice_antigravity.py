@@ -50,8 +50,17 @@ LIVE_PCM_CHUNK_BYTES = 6_400  # 200 ms of signed 16-bit, 16 kHz mono PCM.
 PCM_BYTES_PER_SECOND = 32_000
 SPEECH_RMS_THRESHOLD = 1_843  # -25 dBFS, matching the former ffmpeg probe.
 MIN_AUDIO_MS = 1_000
-DAEMON_PROTOCOL_VERSION = 7
+DAEMON_PROTOCOL_VERSION = 8
 HTTPS_PORT_PATTERN = re.compile(r"listening on random port at (\d+) for HTTPS")
+DEFAULT_RECOGNITION_PROFILE = (
+    "1. 用户主要处于中国大陆中文语境。识别时优先采用符合中国语境的网络热词、"
+    "人名、地名、机构名和日常表达；遇到同音词或歧义词时，根据上下文选择最合理"
+    "的中文写法。\n\n"
+    "2. 用户是一名软件开发者，表达中经常包含中英混合内容以及产品名、框架名、"
+    "API、命令、代码标识符等技术术语。英文术语应保留标准拼写、大小写和缩写，"
+    "同一术语前后保持一致，不随意翻译或音译。可以根据技术语境适度整理标点、"
+    "断句和语序，但不得改变原意，也不要补充用户没有说出的内容。"
+)
 
 
 class BridgeError(RuntimeError):
@@ -420,6 +429,28 @@ def transcription_text(response: dict[str, Any]) -> tuple[str, bool] | None:
     return text, bool(transcription.get("isFinal"))
 
 
+def build_transcription_start_payload(
+    pre_cursor_text: str = "",
+    post_cursor_text: str = "",
+) -> dict[str, Any]:
+    """Build one session request with Omarvoice's stable recognition profile."""
+    context_parts = [DEFAULT_RECOGNITION_PROFILE]
+    nearby_text = pre_cursor_text.strip()
+    if nearby_text:
+        context_parts.append(f"当前光标前文本：\n{nearby_text}")
+
+    payload: dict[str, Any] = {
+        "mimeType": "audio/pcm;rate=16000",
+        "cascadeId": str(uuid.uuid4()),
+        "continuous": False,
+        "preCursorText": "\n\n".join(context_parts),
+    }
+    trailing_text = post_cursor_text.strip()
+    if trailing_text:
+        payload["postCursorText"] = trailing_text
+    return payload
+
+
 def open_transcription_session(
     client: GrpcWebJsonClient,
     start_payload: dict[str, Any],
@@ -480,15 +511,10 @@ def transcribe(
     started_at = time.monotonic()
     with LanguageServer() as server:
         client = GrpcWebJsonClient(server.https_port, server.csrf_token)
-        start_payload: dict[str, Any] = {
-            "mimeType": "audio/pcm;rate=16000",
-            "cascadeId": str(uuid.uuid4()),
-            "continuous": False,
-        }
-        if pre_cursor_text:
-            start_payload["preCursorText"] = pre_cursor_text
-        if post_cursor_text:
-            start_payload["postCursorText"] = post_cursor_text
+        start_payload = build_transcription_start_payload(
+            pre_cursor_text,
+            post_cursor_text,
+        )
 
         (
             stream_connection,
@@ -789,15 +815,10 @@ class LiveRecording:
         completed = threading.Event()
         try:
             setup_started_at = time.monotonic()
-            start_payload: dict[str, Any] = {
-                "mimeType": "audio/pcm;rate=16000",
-                "cascadeId": str(uuid.uuid4()),
-                "continuous": False,
-            }
-            if self.pre_cursor_text:
-                start_payload["preCursorText"] = self.pre_cursor_text
-            if self.post_cursor_text:
-                start_payload["postCursorText"] = self.post_cursor_text
+            start_payload = build_transcription_start_payload(
+                self.pre_cursor_text,
+                self.post_cursor_text,
+            )
 
             session_id = ""
             stream_response: http.client.HTTPResponse

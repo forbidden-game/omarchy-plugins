@@ -157,6 +157,40 @@ class TranscriptTests(unittest.TestCase):
         )
         self.assertEqual(fake_client.calls[1][1]["sequenceNumber"], 0)
         self.assertEqual(fake_client.calls[2][1]["sequenceNumber"], 1)
+        self.assertEqual(
+            fake_client.calls[0][1]["preCursorText"],
+            bridge.DEFAULT_RECOGNITION_PROFILE,
+        )
+
+
+class RecognitionContextTests(unittest.TestCase):
+    def test_default_profile_covers_chinese_developer_dictation(self):
+        payload = bridge.build_transcription_start_payload()
+        context = payload["preCursorText"]
+
+        self.assertIn("中国大陆中文语境", context)
+        self.assertIn("网络热词、人名、地名", context)
+        self.assertIn("用户是一名软件开发者", context)
+        self.assertIn("英文术语应保留标准拼写、大小写和缩写", context)
+        self.assertIn("不得改变原意", context)
+        self.assertNotIn("postCursorText", payload)
+
+    def test_nearby_text_is_appended_without_replacing_profile(self):
+        payload = bridge.build_transcription_start_payload(
+            "const serviceName = \"Omarvoice\";",
+            "return transcript;",
+        )
+
+        self.assertTrue(
+            payload["preCursorText"].startswith(
+                bridge.DEFAULT_RECOGNITION_PROFILE
+            )
+        )
+        self.assertIn(
+            "当前光标前文本：\nconst serviceName = \"Omarvoice\";",
+            payload["preCursorText"],
+        )
+        self.assertEqual(payload["postCursorText"], "return transcript;")
 
 
 class LiveServiceTests(unittest.TestCase):

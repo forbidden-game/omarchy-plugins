@@ -36,6 +36,19 @@ data.
 
 ## Installation
 
+For a fresh machine, the repository-level portable setup installs
+dependencies, Antigravity, Agent Panel, Omarvoice, browser authorization,
+shortcut, and service warmup in one flow:
+
+```bash
+./setup-omarvoice.sh
+```
+
+See `docs/omarvoice-portable-setup.md` at the repository root for the complete
+new-machine and update procedures.
+
+For manual installation:
+
 ```bash
 ./install.sh eipi10.agents
 ./install.sh qwen-asr

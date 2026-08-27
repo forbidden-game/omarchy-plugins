@@ -1,16 +1,18 @@
 #!/usr/bin/python3
 # omarchy:summary=Antigravity accounts, OAuth, quotas, and local pi/omp streaming proxy
-# omarchy:args=[switch <id>] [oauth-start] [oauth-cancel] [refresh [id]] [voice-auth-*] [proxy-*]
+# omarchy:args=[switch <id>] [oauth-client-bootstrap] [oauth-start] [oauth-cancel] [refresh [id]] [voice-auth-*] [proxy-*]
 # omarchy:hidden=true
 """Antigravity control helper for Omarchy Agents plugin.
 
 Fully autonomous: manages independent storage under ~/.config/omarchy/agents/antigravity,
-silent loopback OAuth authorization, token auto-refresh, and live Google Cloud Code quota syncing.
+browser loopback OAuth authorization, token auto-refresh, and live Google Cloud Code quota syncing.
 """
 
 import http.server
 import errno
+import hashlib
 import json
+import mmap
 import os
 import re
 import secrets
@@ -37,6 +39,12 @@ ACCOUNTS_DIR = ANTIGRAVITY_DIR / "accounts"
 AUTH_DIR = ANTIGRAVITY_DIR / "auth"
 BACKUPS_DIR = ANTIGRAVITY_DIR / "backups"
 OAUTH_CONFIG_FILE = ANTIGRAVITY_DIR / "oauth.json"
+ANTIGRAVITY_LANGUAGE_SERVER = Path(
+    os.environ.get(
+        "OMARVOICE_ANTIGRAVITY_LANGUAGE_SERVER",
+        "/opt/Antigravity/resources/bin/language_server",
+    )
+)
 LEGACY_DIR = HOME / ".antigravity_tools"
 PID_FILE = Path("/tmp/omarchy-antigravity-oauth.pid")
 PROXY_DIR = ANTIGRAVITY_DIR / "proxy"
@@ -77,6 +85,16 @@ PROXY_MODELS = [
 ]
 MANAGED_OMP_START = "# BEGIN eipi10.agents antigravity proxy"
 MANAGED_OMP_END = "# END eipi10.agents antigravity proxy"
+SUPPORTED_OAUTH_CLIENT_ID_HASHES = {
+    "bf00c418024ba6bf606ccdc37120976e41bc429dd1d46ecf16a729aa532626ea",
+}
+SUPPORTED_OAUTH_CLIENT_SECRET_HASHES = {
+    "1d2f041093fd95aa8995a038c711d50a7960da09a505381c09a745d6ad0ecc60",
+}
+OAUTH_CLIENT_ID_PATTERN = re.compile(
+    rb"[0-9]{6,}-[A-Za-z0-9_-]{16,}\.apps\.googleusercontent\.com"
+)
+OAUTH_CLIENT_SECRET_PATTERN = re.compile(rb"GOCSPX-[A-Za-z0-9_-]{28}")
 
 
 def _load_oauth_credentials():
@@ -175,6 +193,92 @@ def atomic_write(path, text, mode=0o600):
             Path(temp_name).unlink(missing_ok=True)
         except Exception:
             pass
+
+
+def _supported_binary_value(candidates, fingerprints, label):
+    """Select one known Antigravity value without embedding it in the plugin."""
+    matches = {
+        candidate
+        for candidate in candidates
+        if hashlib.sha256(candidate).hexdigest() in fingerprints
+    }
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Installed Antigravity has no supported {label}; "
+            "update the Omarvoice compatibility table"
+        )
+    return matches.pop().decode("ascii")
+
+
+def extract_antigravity_oauth_client(
+    language_server=ANTIGRAVITY_LANGUAGE_SERVER,
+    client_id_hashes=SUPPORTED_OAUTH_CLIENT_ID_HASHES,
+    client_secret_hashes=SUPPORTED_OAUTH_CLIENT_SECRET_HASHES,
+):
+    """Extract the supported OAuth client shipped inside Antigravity."""
+    language_server = Path(language_server)
+    if not language_server.is_file():
+        raise RuntimeError("Antigravity language_server is not installed")
+    with language_server.open("rb") as handle:
+        with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as binary:
+            client_ids = set(OAUTH_CLIENT_ID_PATTERN.findall(binary))
+            client_secrets = set(OAUTH_CLIENT_SECRET_PATTERN.findall(binary))
+    client_id = _supported_binary_value(
+        client_ids,
+        client_id_hashes,
+        "OAuth client ID",
+    )
+    client_secret = _supported_binary_value(
+        client_secrets,
+        client_secret_hashes,
+        "OAuth client secret",
+    )
+    return client_id, client_secret
+
+
+def ensure_oauth_client_config():
+    """Load or securely derive the OAuth client needed for browser login."""
+    global CLIENT_ID, CLIENT_SECRET
+    if CLIENT_ID and CLIENT_SECRET:
+        return CLIENT_ID, CLIENT_SECRET, "configured"
+
+    client_id, client_secret = extract_antigravity_oauth_client()
+    ensure_storage_migrated()
+    atomic_write(
+        OAUTH_CONFIG_FILE,
+        json.dumps(
+            {
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            indent=2,
+        )
+        + "\n",
+        0o600,
+    )
+    CLIENT_ID = client_id
+    CLIENT_SECRET = client_secret
+    return CLIENT_ID, CLIENT_SECRET, "antigravity-language-server"
+
+
+def oauth_client_bootstrap():
+    """Prepare OAuth client configuration without printing credential data."""
+    try:
+        _, _, source = ensure_oauth_client_config()
+    except RuntimeError as exc:
+        print(json.dumps({
+            "status": "unsupported",
+            "ready": False,
+            "message": str(exc),
+        }, ensure_ascii=False))
+        return 1
+    print(json.dumps({
+        "status": "ready",
+        "ready": True,
+        "source": source,
+        "message": "Antigravity Web OAuth 客户端已就绪",
+    }, ensure_ascii=False))
+    return 0
 
 
 def ensure_proxy_layout():
@@ -778,12 +882,11 @@ def refresh_credential(account_id):
         raise RuntimeError("Active Agent Panel account has no Antigravity credential")
     if not refresh_token:
         raise RuntimeError("Active Agent Panel account has no refresh token")
-    if not CLIENT_ID or not CLIENT_SECRET:
-        raise RuntimeError("Antigravity OAuth client is not configured")
+    client_id, client_secret, _ = ensure_oauth_client_config()
 
     token_params = urllib.parse.urlencode({
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
+        "client_id": client_id,
+        "client_secret": client_secret,
         "refresh_token": refresh_token,
         "grant_type": "refresh_token",
     }).encode("utf-8")
@@ -1164,8 +1267,39 @@ def oauth_cancel(silent=False):
     return 0
 
 
+def open_oauth_browser(auth_url):
+    """Open the authorization URL without tying the browser to this process."""
+    omarchy = shutil.which("omarchy")
+    opener = [omarchy, "launch", "browser", auth_url] if omarchy else None
+    if not opener:
+        xdg_open = shutil.which("xdg-open")
+        opener = [xdg_open, auth_url] if xdg_open else None
+    if not opener:
+        return False
+    try:
+        subprocess.Popen(
+            opener,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except OSError:
+        return False
+
+
 def oauth_start():
     ensure_storage_migrated()
+    try:
+        client_id, client_secret, _ = ensure_oauth_client_config()
+    except RuntimeError as exc:
+        print(json.dumps({
+            "status": "unsupported",
+            "ready": False,
+            "message": str(exc),
+        }, ensure_ascii=False))
+        return 1
     oauth_cancel(silent=True)
     PID_FILE.write_text(str(os.getpid()))
 
@@ -1174,7 +1308,7 @@ def oauth_start():
     redirect_uri = f"http://localhost:{port}/oauth-callback"
 
     params = {
-        "client_id": CLIENT_ID,
+        "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": SCOPES,
@@ -1186,13 +1320,19 @@ def oauth_start():
     auth_url = f"{AUTH_BASE_URL}?{urllib.parse.urlencode(params)}"
 
     copy_to_clipboard(auth_url)
-    send_notification("Antigravity OAuth", "授权链接已复制到剪贴板，请在浏览器中打开完成登录")
+    browser_opened = open_oauth_browser(auth_url)
+    if browser_opened:
+        auth_message = "授权页面已打开，请在浏览器中完成登录"
+    else:
+        auth_message = "授权链接已复制到剪贴板，请在浏览器中打开完成登录"
+    send_notification("Antigravity OAuth", auth_message)
 
     sys.stdout.write(json.dumps({
         "status": "listening",
         "auth_url": auth_url,
         "port": port,
-        "state": state_str
+        "state": state_str,
+        "browser_opened": browser_opened,
     }) + "\n")
     sys.stdout.flush()
 
@@ -1257,8 +1397,8 @@ def oauth_start():
 
     code = auth_result["code"]
     token_params = urllib.parse.urlencode({
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
+        "client_id": client_id,
+        "client_secret": client_secret,
         "code": code,
         "redirect_uri": redirect_uri,
         "grant_type": "authorization_code",
@@ -1409,7 +1549,7 @@ def main():
     if len(sys.argv) < 2:
         print(
             "Usage: omarchy-antigravity-ctl "
-            "[switch <id> | oauth-start | oauth-cancel | refresh [id] | "
+            "[switch <id> | oauth-client-bootstrap | oauth-start | oauth-cancel | refresh [id] | "
             "voice-auth-status | voice-auth-sync | "
             "proxy-install | proxy-start | proxy-stop | proxy-status | "
             "proxy-sync-auth | proxy-configure-clients | proxy-key | proxy-copy <pi|omp> | "
@@ -1423,6 +1563,8 @@ def main():
             print(json.dumps({"success": False, "error": "Missing account_id"}))
             return 1
         return switch_account(sys.argv[2])
+    elif cmd == "oauth-client-bootstrap":
+        return oauth_client_bootstrap()
     elif cmd == "oauth-start":
         return oauth_start()
     elif cmd == "oauth-cancel":

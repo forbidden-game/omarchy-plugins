@@ -21,6 +21,26 @@ All plugins are designed with strict performance budgets, zero-slop UI aesthetic
 
 ## 🚀 Quick Start & Installation
 
+### Portable Omarvoice setup
+
+For a complete Omarvoice installation on a fresh Omarchy machine — including
+dependencies, Antigravity, both plugins, browser OAuth, persistent keyring
+sync, the push-to-talk shortcut, service warmup, and a final health check:
+
+```bash
+omarchy pkg add git
+git clone \
+  https://github.com/forbidden-game/omarchy-plugins.git \
+  ~/.local/share/omarvoice
+~/.local/share/omarvoice/setup-omarvoice.sh
+```
+
+The setup derives the supported OAuth client from the installed Antigravity
+engine and authorizes each machine independently. No account token is stored
+in Git or copied from another computer. See the
+[portable setup guide](docs/omarvoice-portable-setup.md) for options, update
+instructions, persisted-state boundaries, and compatibility handling.
+
 ### 1. Clone the repository
 
 On this machine the repository lives inside the `omarchy_plugins` workspace:

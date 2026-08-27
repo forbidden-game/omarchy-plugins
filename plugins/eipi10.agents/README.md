@@ -113,6 +113,14 @@ this plugin. `voice-auth-status` exposes readiness metadata only;
 token is near expiry, then writes Antigravity's native token shape directly to
 the desktop keyring. No token is printed or passed through QML.
 
+On a new machine, `oauth-client-bootstrap` extracts the supported OAuth client
+shipped in Antigravity's `language_server`. It chooses the client ID and secret
+only when their SHA-256 fingerprints match the compatibility table, writes
+`oauth.json` with mode `0600`, and never prints either value. `oauth-start`
+then opens the default browser, waits for the loopback callback, and persists
+that machine's refresh token. Run the repository's `setup-omarvoice.sh` to
+orchestrate this complete path.
+
 Antigravity 2.11 dictation requires the additional
 `https://www.googleapis.com/auth/aicode` scope. The OAuth flow requests it for
 new authorizations. Existing accounts must explicitly authorize once more;

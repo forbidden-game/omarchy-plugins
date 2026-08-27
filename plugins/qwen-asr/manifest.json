@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "id": "qwen-asr",
-  "name": "Qwen ASR",
-  "version": "1.1.1",
+  "name": "Omarvoice",
+  "version": "2.0.0",
   "author": "XiezhaoPan",
-  "description": "Push-to-talk Qwen Audio 3.0 ASR in the bar: hold to record with a live level meter, release to transcribe into the clipboard.",
+  "description": "Push-to-talk dictation through Antigravity Cloud, authenticated by the local Agent Panel.",
   "kinds": [
     "bar-widget"
   ],
@@ -12,8 +12,8 @@
     "barWidget": "QwenAsrWidget.qml"
   },
   "barWidget": {
-    "displayName": "Qwen ASR",
-    "description": "Hold to record with a live level meter, release to transcribe to clipboard. F9 works as push-to-talk anywhere.",
+    "displayName": "Omarvoice",
+    "description": "Hold to record, release to transcribe through Antigravity Cloud and paste into the focused app.",
     "category": "Utility",
     "allowMultiple": false,
     "defaultSection": "center"

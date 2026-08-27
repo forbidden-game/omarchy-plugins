@@ -1,47 +1,81 @@
-# Qwen ASR (qwen-asr)
+# Omarvoice (`qwen-asr`)
 
-Push-to-talk **Qwen Audio 3.0** speech-to-text recognition widget for the [Omarchy](https://omarchy.org/) shell bar.
+Omarvoice is push-to-talk dictation for the Omarchy bar. Hold the microphone
+button or global shortcut, speak, then release: Omarvoice streams 16 kHz PCM
+to Antigravity Cloud and pastes the transcript into the focused application.
 
-Hold to record with a responsive real-time audio waveform level meter, release to automatically transcribe your voice into the system clipboard.
+The plugin id remains `qwen-asr` so existing bar layouts, IPC commands,
+shortcuts, settings, history, and runtime symlinks keep working.
 
-## Features
+## Architecture
 
-- **Push-to-Talk Anywhere**: Global hotkey support (default `F9` or customizable keyboard/mouse bindings) or press-and-hold on the bar icon.
-- **Interactive Shortcut & Mouse Side Button Capture**: Directly configure, record, and switch push-to-talk hotkeys from the panel (supports `F9`, keyboard combos, mouse side buttons `mouse:275` / `mouse:276`, and mouse middle click).
-- **Dynamic Acoustic Level Meter**: Live acoustic amplitude animation with DC bias calibration and noise floor suppression.
-- **Non-blocking Transcription**: Asynchronous pipeline invoking local or remote Qwen Audio ASR models.
-- **Timing Diagnostics**: Records local stage timings, cloud request latency, HTTP status, request IDs, and automatic retries without storing secrets or transcript content in the diagnostic log.
-- **Direct Clipboard Integration & Auto-paste**: Transcribed Chinese/English speech is instantly typed directly into your active window or copied to your clipboard.
+The transcription path is intentionally split into three readable boundaries:
+
+1. QML records audio, renders the live level meter, and owns clipboard/history.
+2. `bin/omarvoice-antigravity` converts the WAV to mono PCM and implements
+   Antigravity's `StreamAudioTranscription`, `SendAudioChunk`, and
+   `EndAudioSession` gRPC-Web flow.
+3. Agent Panel remains the only owner of the account index and long-lived
+   OAuth credential. Before a session it refreshes the active account and
+   synchronizes Antigravity's system-keyring entry without returning a token
+   to Omarvoice.
+
+The adapter starts Antigravity's language server without the Electron UI.
+OAuth material is never placed in QML, command-line arguments, transcript
+history, or diagnostics. The short-lived engine state is created in a private
+temporary directory and removed after each transcription.
 
 ## Installation
 
 ```bash
+./install.sh eipi10.agents
 ./install.sh qwen-asr
 omarchy-shell shell rescanPlugins
 ```
 
-## Usage & Hotkeys
+Prerequisites:
 
-- **Bar Action**: Click and hold the microphone icon in the bar to start recording; release when finished speaking.
-- **Global Keybinding**: Bind a Hyprland key (e.g. `bind = , F9, ...`) to trigger speech recognition globally.
+- Antigravity 2.11 or newer installed at `/opt/Antigravity`
+- an Antigravity account configured in the `eipi10.agents` Agent Panel
+- `pw-record`, `ffmpeg`, `secret-tool`, `wl-copy`, and `wtype`
 
-## Diagnostics
+Antigravity dictation adds the Google OAuth scope
+`https://www.googleapis.com/auth/aicode`. Accounts authorized before this
+change need one explicit reauthorization. Open the Omarvoice panel, choose
+**重新授权**, complete the browser login, and the readiness row will refresh
+automatically.
 
-Timing records are appended as JSON Lines to:
+## Usage
 
-```text
-~/.local/share/XiezhaoPan/qwen-asr-qt/diagnostics.jsonl
+- Hold the bar microphone button and release to transcribe.
+- The default global push-to-talk shortcut is `F9`; keyboard combinations and
+  supported mouse buttons can be captured in the panel.
+- Turn off **自动直接上屏** to copy without pasting.
+- IPC compatibility is unchanged:
+
+```bash
+omarchy-shell qwen-asr start
+omarchy-shell qwen-asr stop
+omarchy-shell qwen-asr status
 ```
 
-Each transcription receives a trace ID. The log separates audio conversion,
-speech probing, Base64 encoding, every cloud request, automatic retry, and the
-complete pipeline. It never writes the API key, audio payload, or transcript
-text.
+## Diagnostics and data
 
-## Prerequisites
+Existing storage paths are retained for a no-loss migration:
 
-- `sox` / `arecord` or PipeWire recording backend
-- Qwen Audio 3.0 inference backend service running locally or on LAN
+```text
+~/.config/XiezhaoPan/qwen-asr-qt.conf
+~/.local/share/XiezhaoPan/qwen-asr-qt/transcripts.txt
+~/.local/share/XiezhaoPan/qwen-asr-qt/diagnostics.jsonl
+~/.local/share/XiezhaoPan/qwen-asr-qt/recordings/
+```
+
+Any legacy `apiKey` entry in the settings file is ignored and never loaded by
+Omarvoice.
+
+Diagnostics contain stage timings, provider outcomes, audio byte counts, and
+request counts. They never contain OAuth credentials, audio payloads, or
+transcript text.
 
 ## License
 

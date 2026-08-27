@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 # omarchy:summary=Antigravity accounts, OAuth, quotas, and local pi/omp streaming proxy
-# omarchy:args=[switch <id>] [oauth-start] [oauth-cancel] [refresh [id]] [proxy-*]
+# omarchy:args=[switch <id>] [oauth-start] [oauth-cancel] [refresh [id]] [voice-auth-*] [proxy-*]
 # omarchy:hidden=true
 """Antigravity control helper for Omarchy Agents plugin.
 
@@ -95,8 +95,10 @@ def _load_oauth_credentials():
 
 CLIENT_ID, CLIENT_SECRET = _load_oauth_credentials()
 TOKEN_URL = "https://oauth2.googleapis.com/token"
+TOKENINFO_URL = "https://www.googleapis.com/oauth2/v3/tokeninfo"
 USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
 AUTH_BASE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+AICODE_SCOPE = "https://www.googleapis.com/auth/aicode"
 SCOPES = " ".join([
     "openid",
     "https://www.googleapis.com/auth/cloud-platform",
@@ -104,6 +106,7 @@ SCOPES = " ".join([
     "https://www.googleapis.com/auth/userinfo.profile",
     "https://www.googleapis.com/auth/cclog",
     "https://www.googleapis.com/auth/experimentsandconfigs",
+    AICODE_SCOPE,
 ])
 
 QUOTA_ENDPOINTS = [
@@ -713,6 +716,219 @@ def load_credential(account_id):
         return {}
 
 
+def current_account():
+    """Return the active account stub without exposing its credential."""
+    if not ACCOUNTS_INDEX.is_file():
+        return {}
+    try:
+        index_data = json.loads(ACCOUNTS_INDEX.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    current_id = index_data.get("current_account_id")
+    for account in index_data.get("accounts", []):
+        if account.get("id") == current_id and not account.get("disabled"):
+            return account
+    return {}
+
+
+def token_scopes(access_token):
+    """Resolve granted OAuth scopes without printing or persisting the token."""
+    if not access_token:
+        return set()
+    query = urllib.parse.urlencode({"access_token": access_token})
+    try:
+        request = urllib.request.Request(
+            f"{TOKENINFO_URL}?{query}",
+            headers={"User-Agent": "Antigravity/1.0.0 (Linux)"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return set()
+    return set(str(payload.get("scope") or "").split())
+
+
+def refresh_credential(account_id):
+    """Refresh one canonical credential and atomically preserve its long-lived token."""
+    credential = load_credential(account_id)
+    refresh_token = credential.get("refresh_token")
+    if not credential:
+        raise RuntimeError("Active Agent Panel account has no Antigravity credential")
+    if not refresh_token:
+        raise RuntimeError("Active Agent Panel account has no refresh token")
+    if not CLIENT_ID or not CLIENT_SECRET:
+        raise RuntimeError("Antigravity OAuth client is not configured")
+
+    token_params = urllib.parse.urlencode({
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        TOKEN_URL,
+        data=token_params,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "Antigravity/1.0.0 (Linux)",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            token_response = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"Could not refresh the active Agent Panel account: {exc}") from exc
+
+    access_token = token_response.get("access_token")
+    if not access_token:
+        raise RuntimeError("OAuth refresh returned no access token")
+
+    now_ts = int(time.time())
+    expires_in = int(token_response.get("expires_in", 3599))
+    expiry_ts = now_ts + expires_in
+    granted_scopes = set(str(token_response.get("scope") or credential.get("scope") or "").split())
+    if not granted_scopes:
+        granted_scopes = token_scopes(access_token)
+
+    credential.update({
+        "access_token": access_token,
+        "refresh_token": token_response.get("refresh_token") or refresh_token,
+        "expires_in": expires_in,
+        "token_type": token_response.get("token_type") or credential.get("token_type") or "Bearer",
+        "timestamp": now_ts * 1000,
+        "expired": datetime.fromtimestamp(expiry_ts, timezone.utc).isoformat(),
+        "scope": " ".join(sorted(granted_scopes)),
+    })
+    atomic_write(
+        credential_path(account_id),
+        json.dumps(credential, indent=2) + "\n",
+        0o600,
+    )
+    return credential, granted_scopes
+
+
+def voice_auth_status():
+    """Report Omarvoice readiness without returning any OAuth material."""
+    ensure_storage_migrated()
+    account = current_account()
+    if not account:
+        print(json.dumps({
+            "status": "authorization_required",
+            "ready": False,
+            "message": "请先在 Agent Panel 授权 Antigravity 账号",
+        }, ensure_ascii=False))
+        return 1
+
+    credential = load_credential(account.get("id"))
+    if not credential.get("refresh_token"):
+        print(json.dumps({
+            "status": "authorization_required",
+            "ready": False,
+            "email": account.get("email") or "",
+            "message": "Agent Panel 当前账号缺少长期授权",
+        }, ensure_ascii=False))
+        return 1
+
+    granted_scopes = set(str(credential.get("scope") or "").split())
+    if AICODE_SCOPE not in granted_scopes:
+        granted_scopes = token_scopes(credential.get("access_token"))
+    if AICODE_SCOPE not in granted_scopes:
+        print(json.dumps({
+            "status": "reauthorize_required",
+            "ready": False,
+            "email": account.get("email") or "",
+            "message": "需要重新授权一次，以启用 Omarvoice 听写权限",
+        }, ensure_ascii=False))
+        return 2
+
+    print(json.dumps({
+        "status": "ready",
+        "ready": True,
+        "email": account.get("email") or "",
+        "message": "Agent Panel 长期鉴权已就绪",
+    }, ensure_ascii=False))
+    return 0
+
+
+def voice_auth_sync():
+    """Refresh Agent Panel auth and securely hand it to Antigravity's token store."""
+    ensure_storage_migrated()
+    account = current_account()
+    if not account:
+        print(json.dumps({
+            "status": "authorization_required",
+            "ready": False,
+            "message": "请先在 Agent Panel 授权 Antigravity 账号",
+        }, ensure_ascii=False))
+        return 1
+    if not shutil.which("secret-tool"):
+        print(json.dumps({
+            "status": "keyring_unavailable",
+            "ready": False,
+            "message": "系统安全存储不可用，无法启动 Omarvoice",
+        }, ensure_ascii=False))
+        return 1
+
+    try:
+        credential, granted_scopes = refresh_credential(account.get("id"))
+    except RuntimeError as exc:
+        print(json.dumps({
+            "status": "refresh_failed",
+            "ready": False,
+            "message": str(exc),
+        }, ensure_ascii=False))
+        return 1
+
+    if AICODE_SCOPE not in granted_scopes:
+        print(json.dumps({
+            "status": "reauthorize_required",
+            "ready": False,
+            "email": account.get("email") or "",
+            "message": "需要重新授权一次，以启用 Omarvoice 听写权限",
+        }, ensure_ascii=False))
+        return 2
+
+    expiry = credential.get("expired") or datetime.now(timezone.utc).isoformat()
+    native_secret = json.dumps({
+        "auth_method": "consumer",
+        "token": {
+            "access_token": credential.get("access_token") or "",
+            "expiry": expiry,
+            "refresh_token": credential.get("refresh_token") or "",
+            "token_type": credential.get("token_type") or "Bearer",
+        },
+    }, separators=(",", ":"))
+    stored = subprocess.run(
+        [
+            "secret-tool", "store",
+            "--label=Password for 'antigravity' on 'gemini'",
+            "service", "gemini",
+            "username", "antigravity",
+        ],
+        input=native_secret,
+        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+    )
+    if stored.returncode != 0:
+        print(json.dumps({
+            "status": "keyring_write_failed",
+            "ready": False,
+            "message": "无法把 Agent Panel 鉴权同步到系统安全存储",
+        }, ensure_ascii=False))
+        return 1
+
+    print(json.dumps({
+        "status": "ready",
+        "ready": True,
+        "email": account.get("email") or "",
+        "message": "Agent Panel 长期鉴权已同步",
+    }, ensure_ascii=False))
+    return 0
+
+
 def fetch_account_quotas(acc_data, account_file=None):
     """Fetch live quotas from Google Cloud Code API for an account and update account JSON."""
     credential = load_credential(acc_data.get("id"))
@@ -1095,6 +1311,7 @@ def oauth_start():
         "expires_in": expires_in,
         "project_id": existing_credential.get("project_id") or existing_account.get("project_id") or "aicode-consumers",
         "token_type": "Bearer",
+        "scope": token_res.get("scope") or " ".join(sorted(token_scopes(access_token))),
         "timestamp": now_ts * 1000,
         "expired": datetime.fromtimestamp(expiry_ts, timezone.utc).isoformat(),
         "disabled": False,
@@ -1163,6 +1380,7 @@ def main():
         print(
             "Usage: omarchy-antigravity-ctl "
             "[switch <id> | oauth-start | oauth-cancel | refresh [id] | "
+            "voice-auth-status | voice-auth-sync | "
             "proxy-install | proxy-start | proxy-stop | proxy-status | "
             "proxy-sync-auth | proxy-configure-clients | proxy-key | proxy-copy <pi|omp> | "
             "proxy-watchdog | credentials-migrate]"
@@ -1194,6 +1412,10 @@ def main():
         trigger_collector_update()
         print(json.dumps({"status": "refreshed"}))
         return 0
+    elif cmd == "voice-auth-status":
+        return voice_auth_status()
+    elif cmd == "voice-auth-sync":
+        return voice_auth_sync()
     elif cmd == "proxy-install":
         return proxy_install()
     elif cmd == "proxy-start":

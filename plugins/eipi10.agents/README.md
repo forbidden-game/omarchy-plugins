@@ -82,12 +82,13 @@ generates a random local API key, and adds the `antigravity-proxy` provider to
 both clients without changing their default models.
 
 Credentials have one source of truth:
-`~/.config/omarchy/agents/antigravity/auth/`. CLIProxyAPI is the only runtime
-writer for access-token refreshes. Account files under `accounts/` contain
-display and quota metadata only, so restarting the service cannot replace a
-new proxy token with an older copy. A five-minute systemd watchdog restarts
-the proxy once for a new authentication failure and notifies the desktop if
-the same failure persists.
+`~/.config/omarchy/agents/antigravity/auth/`. CLIProxyAPI and the Agent Panel
+auth controller are the only runtime writers for access-token refreshes;
+consumers such as Omarvoice never read or rewrite the credential directly.
+Account files under `accounts/` contain display and quota metadata only, so
+restarting a consumer cannot replace a new token with an older copy. A
+five-minute systemd watchdog restarts the proxy once for a new authentication
+failure and notifies the desktop if the same failure persists.
 
 The configured models use the clients' `openai-responses` implementation, so
 reasoning summaries, interactive responses, and tool calls use typed streaming
@@ -103,6 +104,19 @@ either launch command. The service starts with the user session; stopping it
 from the panel keeps it stopped until the next manual start or login. Runtime
 configuration stays under `~/.config/omarchy/agents/antigravity/proxy/`; no
 secret is stored in this repository.
+
+### Omarvoice authentication
+
+Omarvoice reuses the active Antigravity account and long-lived OAuth flow from
+this plugin. `voice-auth-status` exposes readiness metadata only;
+`voice-auth-sync` refreshes the canonical credential and writes Antigravity's
+native token shape directly to the desktop keyring. No token is printed or
+passed through QML.
+
+Antigravity 2.11 dictation requires the additional
+`https://www.googleapis.com/auth/aicode` scope. The OAuth flow requests it for
+new authorizations. Existing accounts must explicitly authorize once more;
+the old refresh token cannot gain a new scope silently.
 
 Claude limits need a signed-in CLI; without credentials the panel says so and
 falls back to local stats only. A non-default Claude directory is honored via

@@ -5,7 +5,7 @@ import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 
-// Floating capsule HUD for Qwen ASR push-to-talk.
+// Floating capsule HUD for Omarvoice push-to-talk.
 // Renders a smooth, non-intrusive pill at the bottom-center of the screen
 // during cold-start arming, active recording, transcription, and instant completion.
 //
@@ -211,11 +211,7 @@ PanelWindow {
           anchors.centerIn: parent
           text: {
             if (hud.status === "arming") return "正在唤醒麦克风…"
-            if (hud.status === "transcribing") {
-              return hud.controller.retryAttempt > 0
-                ? "重试识别 " + hud.controller.retryAttempt + "/3…"
-                : "正在转写…"
-            }
+            if (hud.status === "transcribing") return "云端转写中…"
             if (hud.status === "success") return hud.controller.hudMessage || "已直接上屏"
             if (hud.status === "error") return hud.controller.hudMessage || "识别失败"
             return ""

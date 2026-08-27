@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Omarvoice command-line entry point for Antigravity cloud dictation."""
+
+from pathlib import Path
+import sys
+
+
+PLUGIN_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PLUGIN_DIR / "lib"))
+
+from omarvoice_antigravity import main  # noqa: E402
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

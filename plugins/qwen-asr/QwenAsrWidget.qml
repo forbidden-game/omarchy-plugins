@@ -6,10 +6,10 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// Qwen ASR bar widget.
+// Omarvoice bar widget (the qwen-asr module id is retained for compatibility).
 //
 // Left button: push-to-talk — press to arm recording, release to transcribe & auto-paste.
-// Right button: toggle the panel (live meter, device status, toggles, recent transcripts, API key).
+// Right button: toggle the panel (device, Agent Panel auth, shortcuts, and history).
 // Global push-to-talk: F9 via Hyprland bind -> `omarchy-shell qwen-asr start/stop`.
 Panel {
   id: root
@@ -183,15 +183,7 @@ Panel {
 
   function openHistoryFile() {
     if (root.bar) root.bar.run("omarchy launch editor " + Util.shellQuote(controller.historyFile))
-    else controller.notify("󰈙", "Qwen ASR", "记录文件：" + controller.historyFile, "low")
-  }
-
-  function saveKey() {
-    var result = controller.setApiKey(keyField.text)
-    if (result === "ok") {
-      keyField.text = ""
-      root.close()
-    }
+    else controller.notify("󰈙", "Omarvoice", "记录文件：" + controller.historyFile, "low")
   }
 
   // ------------------------------------------------------------------ icon
@@ -212,8 +204,9 @@ Panel {
 
       onPressed: function(mouse) {
         if (mouse.button === Qt.LeftButton) {
-          if (!controller.apiKeyConfigured) {
-            controller.fail("缺少 DashScope API Key，请在面板中配置", "input")
+          if (!controller.authReady) {
+            controller.loadAuthStatus()
+            controller.fail(controller.authMessage || "Agent Panel 鉴权尚未就绪", "auth")
             root.open()
             return
           }
@@ -302,10 +295,12 @@ Panel {
         text: root.arming ? "正在启动麦克风…"
           : (root.recording ? (controller.autoPaste ? "松开以转写并直接上屏" : "松开以转写到剪贴板")
              : (root.transcribing
-                ? (controller.retryAttempt > 0 ? "识别为空，重试 " + controller.retryAttempt + "/3…" : "转写中…")
+                ? "Antigravity 云端转写中…"
                 : (root.offline ? "网络不可用 · 右键查看"
                    : (root.hasError ? "上次出错 · 右键查看"
-                      : (controller.apiKeyConfigured ? ("按住录音 · 松开上屏 · " + controller.currentShortcutDisplay) : "未配置 API Key，点击右键配置")))))
+                      : (controller.authReady
+                         ? ("按住录音 · 松开上屏 · " + controller.currentShortcutDisplay)
+                         : "Agent Panel 鉴权未就绪 · 右键处理")))))
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
@@ -320,7 +315,7 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    focusTarget: root.capturingShortcut ? captureFocusItem : keyField
+    focusTarget: root.capturingShortcut ? captureFocusItem : authButton
     contentWidth: Style.space(460)
     contentHeight: root.capturingShortcut ? Style.space(680) : Style.space(630)
 
@@ -366,9 +361,9 @@ Panel {
                 text: root.arming ? "正在启动麦克风…"
                   : (root.recording ? "正在录音…"
                      : (root.transcribing
-                        ? (controller.retryAttempt > 0 ? "正在重试 " + controller.retryAttempt + "/3…" : "正在转写…")
+                        ? "正在通过 Antigravity 云端转写…"
                         : (root.offline ? "网络不可用"
-                           : (root.hasError ? "上次出错" : "Qwen Audio 3.0 ASR"))))
+                           : (root.hasError ? "上次出错" : "Omarvoice · Antigravity Cloud"))))
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
@@ -731,7 +726,7 @@ Panel {
             hoverEnabled: true
             onClicked: {
               Quickshell.clipboardText = modelData.text
-              controller.notify("󰆏", "Qwen ASR", "已复制到剪贴板 (" + modelData.text.length + "字)", "low")
+              controller.notify("󰆏", "Omarvoice", "已复制到剪贴板 (" + modelData.text.length + "字)", "low")
             }
           }
 
@@ -791,34 +786,61 @@ Panel {
 
       PanelSeparator {}
 
-      // Settings: API key
+      // Agent Panel owns long-lived OAuth; Omarvoice only reports readiness.
       RowLayout {
         width: parent.width
         spacing: Style.space(8)
 
-        TextField {
-          id: keyField
+        Text {
+          text: controller.authReady ? "󰄬"
+            : (controller.authState === "checking" || controller.authState === "authorizing"
+               ? "󰔟" : "󰅚")
+          color: controller.authReady ? root.accent
+            : (controller.authState === "checking" || controller.authState === "authorizing"
+               ? root.dim : root.urgent)
+          font.family: root.fontFamily
+          font.pixelSize: Style.space(16)
+        }
+
+        Column {
           Layout.fillWidth: true
-          placeholderText: controller.apiKeyConfigured ? "API Key 已配置（输入以更换）" : "输入 DashScope API Key"
-          echoMode: TextInput.Password
-          color: root.foreground
-          placeholderTextColor: root.dim
-          background: Rectangle {
-            radius: Style.space(4)
-            color: "transparent"
-            border.width: 1
-            border.color: root.dim
+          spacing: 1
+
+          Text {
+            text: "Agent Panel 长期鉴权"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
           }
-          onAccepted: saveKey()
+
+          Text {
+            width: parent.width
+            text: (controller.authAccount !== "" ? controller.authAccount + " · " : "")
+              + controller.authMessage
+            color: controller.authReady ? root.dim : root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Math.max(9, Style.font.body * 0.72)
+            elide: Text.ElideRight
+          }
         }
 
         Button {
-          id: saveButton
-          text: "保存"
+          id: authButton
+          text: controller.authReady ? "刷新"
+            : (controller.authState === "authorizing" || controller.authState === "checking"
+               ? "检查" : "重新授权")
           bordered: true
-          foreground: root.foreground
+          foreground: controller.authReady ? root.foreground : root.accent
           fontFamily: root.fontFamily
-          onClicked: saveKey()
+          onClicked: {
+            if (controller.authReady || controller.authState === "authorizing"
+                || controller.authState === "checking") {
+              controller.loadAuthStatus()
+            } else {
+              controller.beginAuthorization()
+            }
+          }
         }
       }
 

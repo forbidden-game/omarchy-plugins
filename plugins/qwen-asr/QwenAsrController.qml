@@ -3,9 +3,8 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Services.Pipewire
 
-// Core of the Qwen ASR bar plugin: recording, live input level metering,
-// cloud transcription, text cleaning, history, settings, clipboard, and the
-// push-to-talk IPC surface.
+// Core of Omarvoice: recording, live input level metering, Antigravity cloud
+// dictation, text cleaning, history, settings, clipboard, and push-to-talk IPC.
 //
 // All state transitions run through `state`:
 //   idle -> arming -> recording -> transcribing -> idle
@@ -35,30 +34,27 @@ Item {
   readonly property string historyFile: historyDir + "/transcripts.txt"
   readonly property string diagnosticsFile: historyDir + "/diagnostics.jsonl"
   readonly property string recordingsDir: historyDir + "/recordings"
-  readonly property string model: "qwen-audio-3.0-asr-flash"
-  readonly property int maxInlineAudioBytes: 7 * 1024 * 1024
+  readonly property string model: "antigravity-cloud"
+  readonly property string bridgeBinary: homeDir + "/.config/omarchy/plugins/qwen-asr/bin/omarvoice-antigravity"
   readonly property int sampleRate: 16000
   readonly property int channels: 1
   readonly property int minRecordingMs: 1000
-  readonly property int maxNoWordsRetries: 3
-  readonly property string baseUrl: {
-    var env = Quickshell.env("DASHSCOPE_BASE_URL") || ""
-    var origin = env !== "" ? env : "https://dashscope.aliyuncs.com"
-    return origin + "/api/v1/services/aigc/multimodal-generation/generation"
-  }
 
   // ---------------------------------------------------------------- state
   property string state: "idle" // idle | arming | recording | transcribing
   property string lastError: ""
-  property string errorKind: "" // "" | offline | input | recording | asr
+  property string errorKind: "" // "" | offline | input | recording | auth | asr
   property string lastTranscript: ""
-  property bool apiKeyConfigured: false
+  property bool authReady: false
+  property string authState: "checking" // checking | ready | authorizing | reauthorize | error
+  property string authMessage: "正在检查 Agent Panel 鉴权…"
+  property string authAccount: ""
+  property int authPollCount: 0
   property int elapsedSec: 0
-  property int retryAttempt: 0
   property var recent: [] // [{time, text}] most recent first, max 10
 
   // Per-transcription timing context. Diagnostic entries intentionally exclude
-  // the API key, audio content, and transcript text.
+  // OAuth material, audio content, and transcript text.
   property string diagnosticTraceId: ""
   property string diagnosticStage: "idle"
   property double diagnosticPipelineStartMs: 0
@@ -210,38 +206,33 @@ Item {
     root.barLevels = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
   }
 
-  // -------------------------------------------------------------- settings
-  property string apiKey: "" // env DASHSCOPE_API_KEY, else QSettings INI
-
-  function loadApiKey() {
-    var envKey = (Quickshell.env("DASHSCOPE_API_KEY") || "").trim()
-    if (envKey !== "") {
-      root.apiKey = envKey
-      root.apiKeyConfigured = true
-    }
+  // ------------------------------------------------------ settings & auth
+  function loadSettings() {
     settingsReadProc.command = ["bash", "-c",
       "f=" + shellQuote(root.settingsFile) + "; "
       + "if [ -f \"$f\" ]; then "
-      + "  k=$(grep -E '^[[:space:]]*apiKey[[:space:]]*=' \"$f\" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '[:space:]'); "
       + "  ap=$(grep -E '^[[:space:]]*autoPaste[[:space:]]*=' \"$f\" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '[:space:]'); "
       + "  sh=$(grep -E '^[[:space:]]*showHud[[:space:]]*=' \"$f\" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '[:space:]'); "
-      + "  printf '%s\\n%s\\n%s\\n' \"$k\" \"$ap\" \"$sh\"; "
+      + "  printf '%s\\n%s\\n' \"$ap\" \"$sh\"; "
       + "fi"]
     settingsReadProc.running = true
   }
 
-  function setApiKey(newKey) {
-    var key = String(newKey || "").trim()
-    if (key === "") {
-      root.lastError = "API Key 不能为空"
-      root.errorKind = "input"
-      return "API Key 不能为空"
-    }
-    writeConfigKey("apiKey", key, function() {
-      root.loadApiKey()
-      root.notify("󰄬", "Qwen ASR", "API Key 已保存", "low")
-    })
-    return "ok"
+  function loadAuthStatus() {
+    if (authStatusProc.running) return
+    root.authState = root.authState === "authorizing" ? "authorizing" : "checking"
+    authStatusProc.command = [root.bridgeBinary, "status"]
+    authStatusProc.running = true
+  }
+
+  function beginAuthorization() {
+    if (authorizeProc.running) return
+    root.authReady = false
+    root.authState = "authorizing"
+    root.authMessage = "等待浏览器授权…"
+    root.authPollCount = 0
+    authorizeProc.command = [root.bridgeBinary, "authorize"]
+    authorizeProc.running = true
   }
 
   function setAutoPaste(enabled) {
@@ -295,13 +286,19 @@ Item {
     if (root.state !== "idle") return
     root.clearError()
 
+    if (!root.authReady) {
+      root.loadAuthStatus()
+      root.fail(root.authMessage || "Agent Panel 鉴权尚未就绪", "auth")
+      return
+    }
+
     if (!Pipewire.defaultAudioSource) {
       root.fail("未检测到可用的录音设备，请检查麦克风", "recording")
       return
     }
 
     var now = Date.now()
-    var name = "qwen-asr-" + now + ".wav"
+    var name = "omarvoice-" + now + ".wav"
     root.recPath = root.recordingsDir + "/" + name
     root.recordStartMs = now
     root.discardNextStop = false
@@ -364,8 +361,6 @@ Item {
     root.hudStatus = "transcribing"
     root.hudVisible = true
     hudDismissTimer.stop()
-    root.retryAttempt = 0
-
     var filename = path.slice(path.lastIndexOf("/") + 1)
     root.diagnosticTraceId = filename.endsWith(".wav") ? filename.slice(0, -4) : filename
     root.diagnosticStage = "speech_probe"
@@ -422,160 +417,64 @@ Item {
       root.fail("未检测到有效语音；WAV 已保留", "input")
       return
     }
-    root.diagnosticStage = "base64"
+    root.diagnosticStage = "cloud"
     root.diagnosticStageStartMs = Date.now()
-    base64Proc.command = ["base64", "-w0", path]
-    base64Proc.contextPath = path
-    base64Proc.running = true
-  }
-
-  function onBase64Ready(b64, path) {
-    if (b64 === null) {
-      root.appendDiagnostic("stage_finished", {
-        stage: "base64",
-        duration_ms: Math.round(Date.now() - root.diagnosticStageStartMs),
-        outcome: "error"
-      })
-      root.fail("读取录音文件失败；WAV 已保留", "recording")
-      return
-    }
-    root.diagnosticAudioBytes = root.decodedBase64Bytes(b64)
-    root.appendDiagnostic("stage_finished", {
-      stage: "base64",
-      duration_ms: Math.round(Date.now() - root.diagnosticStageStartMs),
-      outcome: "success",
-      audio_bytes: root.diagnosticAudioBytes
-    })
-    if (root.diagnosticAudioBytes > root.maxInlineAudioBytes) {
-      root.fail("录音过长；当前 Base64 接口请控制在约 3 分 45 秒以内", "input")
-      return
-    }
-    root.diagnosticStage = "api"
-    root.diagnosticApiStartMs = Date.now()
-    root.submit(b64, 0)
-  }
-
-  function submit(b64, attempt) {
-    root.retryAttempt = attempt
-    root.diagnosticRequestCount++
-    var attemptNumber = attempt + 1
-    var requestStartMs = Date.now()
+    root.diagnosticApiStartMs = root.diagnosticStageStartMs
+    root.diagnosticRequestCount = 1
     root.appendDiagnostic("request_started", {
-      attempt: attemptNumber,
-      audio_bytes: root.diagnosticAudioBytes
+      attempt: 1,
+      provider: root.model
     })
-    var dataUri = "data:audio/wav;base64," + b64
-    var payload = {
-      model: root.model,
-      input: {
-        messages: [ {
-          role: "user",
-          content: [ { type: "input_audio", input_audio: { data: dataUri } } ]
-        } ]
-      },
-      parameters: {
-        format: "wav",
-        sample_rate: String(root.sampleRate),
-        language_hints: []
-      }
-    }
+    transcribeProc.command = [root.bridgeBinary, "transcribe", path]
+    transcribeProc.contextPath = path
+    transcribeProc.running = true
+  }
 
-    var xhr = new XMLHttpRequest()
-    var settled = false
-    xhr.open("POST", root.baseUrl, true)
-    xhr.setRequestHeader("Content-Type", "application/json")
-    xhr.setRequestHeader("Authorization", "Bearer " + root.apiKey)
-    xhr.setRequestHeader("X-DashScope-SSE", "disable")
-    xhr.onreadystatechange = function() {
-      if (xhr.readyState !== XMLHttpRequest.DONE || settled) return
-      settled = true
-      var elapsedMs = Math.round(Date.now() - requestStartMs)
-      var requestId = root.responseRequestId(xhr)
-      if (xhr.status === 0) {
-        root.appendDiagnostic("request_finished", {
-          attempt: attemptNumber,
-          duration_ms: elapsedMs,
-          http_status: 0,
-          outcome: "network_error",
-          request_id: requestId
-        })
-        root.fail("网络不可用，请检查连接后重试", "offline")
-        return
-      }
-      if (xhr.status !== 200) {
-        var noWords = root.isNoWordsError(xhr.responseText)
-        var shouldRetry = noWords && attempt < root.maxNoWordsRetries
-        root.appendDiagnostic("request_finished", {
-          attempt: attemptNumber,
-          duration_ms: elapsedMs,
-          http_status: xhr.status,
-          outcome: shouldRetry ? "retry_no_words"
-            : (noWords ? "no_words_exhausted" : "http_error"),
-          request_id: requestId
-        })
-        if (shouldRetry) {
-          root.appendDiagnostic("retry_scheduled", {
-            previous_attempt: attemptNumber,
-            next_attempt: attemptNumber + 1,
-            reason: "ASR_RESPONSE_HAVE_NO_WORDS"
-          })
-          root.submit(b64, attempt + 1)
-          return
-        }
-        root.fail(root.apiErrorText(xhr.responseText, "ASR 请求失败（HTTP " + xhr.status + "）"), "asr")
-        return
-      }
-      var text = root.parseRecognition(xhr.responseText)
-      if (text === null) {
-        root.appendDiagnostic("request_finished", {
-          attempt: attemptNumber,
-          duration_ms: elapsedMs,
-          http_status: xhr.status,
-          outcome: "empty_response",
-          request_id: requestId
-        })
-        root.fail(root.apiErrorText(xhr.responseText, "ASR 返回为空"), "asr")
-        return
-      }
+  function onCloudFinished(output, path, ok) {
+    var result = null
+    try {
+      result = JSON.parse(String(output || "").trim())
+    } catch (e) {
+      result = null
+    }
+    var elapsedMs = Math.round(Date.now() - root.diagnosticApiStartMs)
+    if (!ok || !result || result.status !== "success") {
+      var code = result ? String(result.code || "provider_error") : "bridge_error"
+      var message = result ? String(result.message || "Omarvoice 云端听写失败")
+        : "Omarvoice 听写桥接服务没有返回有效结果"
       root.appendDiagnostic("request_finished", {
-        attempt: attemptNumber,
+        attempt: 1,
         duration_ms: elapsedMs,
-        http_status: xhr.status,
-        outcome: "success",
-        request_id: requestId
+        outcome: code
       })
-      root.finishTranscript(text)
+      if (code === "reauthorize_required" || code === "authorization_required") {
+        root.authReady = false
+        root.authState = "reauthorize"
+        root.authMessage = message
+      }
+      var kind = code === "reauthorize_required" || code === "authorization_required"
+        ? "auth" : (code.indexOf("network") >= 0 ? "offline" : "asr")
+      root.fail(message + "；WAV 已保留", kind)
+      return
     }
-    xhr.ontimeout = function() {
-      if (settled) return
-      settled = true
-      root.appendDiagnostic("request_finished", {
-        attempt: attemptNumber,
-        duration_ms: Math.round(Date.now() - requestStartMs),
-        http_status: 0,
-        outcome: "timeout",
-        request_id: ""
-      })
-      root.fail("ASR 请求超时", "asr")
-    }
-    xhr.onerror = function() {
-      if (settled) return
-      settled = true
-      root.appendDiagnostic("request_finished", {
-        attempt: attemptNumber,
-        duration_ms: Math.round(Date.now() - requestStartMs),
-        http_status: 0,
-        outcome: "network_error",
-        request_id: ""
-      })
-      root.fail("网络不可用，请检查连接后重试", "offline")
-    }
-    xhr.timeout = 120000
-    xhr.send(JSON.stringify(payload))
+    root.diagnosticAudioBytes = Number(result.audio_bytes || 0)
+    root.diagnosticRequestCount = Number(result.request_count || 1)
+    root.appendDiagnostic("request_finished", {
+      attempt: 1,
+      duration_ms: elapsedMs,
+      outcome: "success",
+      audio_bytes: root.diagnosticAudioBytes,
+      cloud_requests: root.diagnosticRequestCount
+    })
+    root.finishTranscript(String(result.text || ""))
   }
 
   function finishTranscript(rawText) {
     var text = root.cleanTranscript(rawText)
+    if (text === "") {
+      root.fail("云端没有识别到可转写的语音；WAV 已保留", "input")
+      return
+    }
     root.appendDiagnostic("pipeline_finished", {
       outcome: "success",
       total_ms: Math.round(Date.now() - root.diagnosticPipelineStartMs),
@@ -622,7 +521,6 @@ Item {
   function clearError() {
     root.lastError = ""
     root.errorKind = ""
-    root.retryAttempt = 0
   }
 
   function fail(message, kind) {
@@ -641,7 +539,6 @@ Item {
       root.diagnosticStage = "idle"
     }
     root.state = "idle"
-    root.retryAttempt = 0
     root.lastError = message
     root.errorKind = kind || "asr"
     root.hudStatus = "error"
@@ -649,72 +546,7 @@ Item {
     root.hudVisible = true
     hudDismissTimer.interval = 2400
     hudDismissTimer.restart()
-    root.notify("󰅚", "Qwen ASR 错误", message, "normal")
-  }
-
-  // ------------------------------------------------------ response parsing
-  function parseRecognition(body) {
-    var rootObj = null
-    try {
-      rootObj = JSON.parse(body)
-    } catch (e) {
-      return null
-    }
-    if (!rootObj || typeof rootObj !== "object") return null
-    var output = rootObj.output || {}
-    var text = String(output.text || "").trim()
-    if (text === "") text = String((((output.output || {}).sentence) || {}).text || "").trim()
-    if (text === "") text = String(((output.sentence) || {}).text || "").trim()
-    return text === "" ? null : text
-  }
-
-  function apiErrorText(body, fallback) {
-    var rootObj = null
-    try {
-      rootObj = JSON.parse(body)
-    } catch (e) {
-      return fallback
-    }
-    if (!rootObj || typeof rootObj !== "object") return fallback
-    function errFrom(obj) {
-      if (!obj || typeof obj !== "object") return ""
-      var msg = obj.message || obj.error || ""
-      var code = obj.code || ""
-      if (String(msg).trim() === "") return ""
-      return code !== "" ? code + "：" + msg : String(msg)
-    }
-    var nested = errFrom(rootObj.error) || errFrom(rootObj.output) || errFrom(rootObj)
-    return nested !== "" ? nested : fallback
-  }
-
-  function isNoWordsError(body) {
-    return String(body || "").indexOf("ASR_RESPONSE_HAVE_NO_WORDS") >= 0
-  }
-
-  function decodedBase64Bytes(b64) {
-    var value = String(b64 || "")
-    var padding = 0
-    if (value.slice(-2) === "==") padding = 2
-    else if (value.slice(-1) === "=") padding = 1
-    return Math.max(0, Math.floor(value.length * 3 / 4) - padding)
-  }
-
-  function responseRequestId(xhr) {
-    var requestId = ""
-    try {
-      requestId = String(xhr.getResponseHeader("x-request-id")
-        || xhr.getResponseHeader("x-dashscope-request-id") || "")
-    } catch (e) {
-      requestId = ""
-    }
-    if (requestId !== "") return requestId
-    try {
-      var body = JSON.parse(xhr.responseText || "{}")
-      requestId = String(body.request_id || ((body.output || {}).request_id) || "")
-    } catch (e2) {
-      requestId = ""
-    }
-    return requestId
+    root.notify("󰅚", "Omarvoice 错误", message, "normal")
   }
 
   // --------------------------------------------------------------- cleaner
@@ -934,13 +766,8 @@ Item {
     onExited: function(code) {
       if (code === 0) {
         var lines = settingsReadProc.stdout.text.split("\n")
-        var k = lines[0] ? lines[0].trim() : ""
-        var ap = lines[1] ? lines[1].trim() : ""
-        var sh = lines[2] ? lines[2].trim() : ""
-        if (root.apiKey === "" && k !== "") {
-          root.apiKey = k
-          root.apiKeyConfigured = true
-        }
+        var ap = lines[0] ? lines[0].trim() : ""
+        var sh = lines[1] ? lines[1].trim() : ""
         if (ap !== "") root.autoPaste = ap === "true"
         if (sh !== "") root.showHud = sh === "true"
       }
@@ -969,7 +796,7 @@ Item {
         }
         var icon = root.shortcutIcon(root.currentShortcut)
         var name = root.friendlyShortcutName(root.currentShortcut)
-        root.notify(icon, "Qwen ASR 快捷键已生效", "按住 [" + name + "] 即可直接语音输入", "low")
+        root.notify(icon, "Omarvoice 快捷键已生效", "按住 [" + name + "] 即可直接语音输入", "low")
         if (shortcutWriteProc.callback) shortcutWriteProc.callback(true)
       } else {
         root.fail("修改快捷键失败", "recording")
@@ -1011,14 +838,73 @@ Item {
   }
 
   Process {
-    id: base64Proc
+    id: transcribeProc
     property string contextPath: ""
     stdout: StdioCollector { waitForEnd: true }
     onExited: function(code) {
-      var b64 = code === 0 ? base64Proc.stdout.text.trim() : null
-      var path = base64Proc.contextPath
-      base64Proc.contextPath = ""
-      root.onBase64Ready(b64, path)
+      var output = transcribeProc.stdout.text
+      var path = transcribeProc.contextPath
+      transcribeProc.contextPath = ""
+      root.onCloudFinished(output, path, code === 0)
+    }
+  }
+
+  Process {
+    id: authStatusProc
+    stdout: StdioCollector { waitForEnd: true }
+    onExited: function(code) {
+      var result = null
+      try {
+        result = JSON.parse(authStatusProc.stdout.text.trim())
+      } catch (e) {
+        result = null
+      }
+      root.authReady = code === 0 && result && result.ready === true
+      root.authAccount = result ? String(result.email || "") : ""
+      root.authMessage = result
+        ? String(result.message || "Agent Panel 鉴权尚未就绪")
+        : "无法读取 Agent Panel 鉴权状态"
+      if (root.authReady) {
+        root.authState = "ready"
+        authPollTimer.stop()
+      } else if (result && (result.code === "reauthorize_required"
+                           || result.status === "reauthorize_required")) {
+        root.authState = root.authState === "authorizing" ? "authorizing" : "reauthorize"
+      } else {
+        root.authState = root.authState === "authorizing" ? "authorizing" : "error"
+      }
+    }
+  }
+
+  Process {
+    id: authorizeProc
+    stdout: StdioCollector { waitForEnd: true }
+    onExited: function(code) {
+      if (code !== 0) {
+        root.authState = "error"
+        root.authMessage = "无法启动 Agent Panel 授权"
+        return
+      }
+      root.authState = "authorizing"
+      root.authMessage = "授权链接已复制；完成登录后会自动刷新"
+      root.authPollCount = 0
+      authPollTimer.restart()
+    }
+  }
+
+  Timer {
+    id: authPollTimer
+    interval: 5000
+    repeat: true
+    onTriggered: {
+      root.authPollCount++
+      if (root.authPollCount > 60) {
+        authPollTimer.stop()
+        root.authState = "reauthorize"
+        root.authMessage = "授权等待超时，请重试"
+        return
+      }
+      root.loadAuthStatus()
     }
   }
 
@@ -1083,7 +969,8 @@ Item {
 
   Component.onCompleted: {
     root.appendDiagnostic("plugin_loaded", { model: root.model })
-    root.loadApiKey()
+    root.loadSettings()
+    root.loadAuthStatus()
     root.loadShortcut()
     root.loadHistory()
   }

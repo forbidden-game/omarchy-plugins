@@ -14,8 +14,8 @@ def get_shortcut():
         try:
             with open(BINDINGS_FILE, "r", encoding="utf-8") as f:
                 content = f.read()
-            # Match o.bind("...", "Start recording (Qwen ASR...
-            m = re.search(r'o\.bind\(\s*["\']([^"\']+)["\']\s*,\s*["\'][^"\']*Start recording \(Qwen ASR[^"\']*["\']', content, re.IGNORECASE)
+            # Accept both the legacy Qwen label and the Omarvoice display name.
+            m = re.search(r'o\.bind\(\s*["\']([^"\']+)["\']\s*,\s*["\'][^"\']*Start recording \((?:Qwen ASR|Omarvoice)[^"\']*["\']', content, re.IGNORECASE)
             if not m:
                 m = re.search(r'o\.bind\(\s*["\']([^"\']+)["\']\s*,\s*["\'][^"\']*qwen-asr start[^"\']*["\']', content, re.IGNORECASE)
             if m:
@@ -51,14 +51,14 @@ def set_shortcut(new_key):
         content = "-- Hyprland personal bindings\n"
 
     primary_block = (
-        f'-- Qwen ASR push-to-talk (hold to record, release to transcribe).\n'
-        f'o.bind("{new_key}", "Start recording (Qwen ASR push-to-talk)", "omarchy-shell qwen-asr start")\n'
-        f'o.bind("{new_key}", "Stop recording (Qwen ASR push-to-talk)", "omarchy-shell qwen-asr stop", {{ release = true }})'
+        f'-- Omarvoice push-to-talk (hold to record, release to transcribe).\n'
+        f'o.bind("{new_key}", "Start recording (Omarvoice push-to-talk)", "omarchy-shell qwen-asr start")\n'
+        f'o.bind("{new_key}", "Stop recording (Omarvoice push-to-talk)", "omarchy-shell qwen-asr stop", {{ release = true }})'
     )
 
-    # Regex for standard qwen block
-    qwen_block_regex = r'-- Qwen ASR push-to-talk[^\n]*\n\s*o\.bind\([^\n]+qwen-asr start[^\n]*\)\n\s*o\.bind\([^\n]+qwen-asr stop[^\n]*\)'
-    general_qwen_regex = r'o\.bind\(\s*["\'][^"\']+["\']\s*,\s*["\'][^"\']*Start recording \(Qwen ASR[^\n]*\)\n\s*o\.bind\(\s*["\'][^"\']+["\']\s*,\s*["\'][^"\']*Stop recording \(Qwen ASR[^\n]*\)'
+    # Match the managed block across the old and new display names.
+    qwen_block_regex = r'-- (?:Qwen ASR|Omarvoice) push-to-talk[^\n]*\n\s*o\.bind\([^\n]+qwen-asr start[^\n]*\)\n\s*o\.bind\([^\n]+qwen-asr stop[^\n]*\)'
+    general_qwen_regex = r'o\.bind\(\s*["\'][^"\']+["\']\s*,\s*["\'][^"\']*Start recording \((?:Qwen ASR|Omarvoice)[^\n]*\)\n\s*o\.bind\(\s*["\'][^"\']+["\']\s*,\s*["\'][^"\']*Stop recording \((?:Qwen ASR|Omarvoice)[^\n]*\)'
 
     if re.search(qwen_block_regex, content):
         new_content = re.sub(qwen_block_regex, primary_block, content, count=1)

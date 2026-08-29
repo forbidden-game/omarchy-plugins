@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "eipi10.touchpad",
+  "name": "Touchpad",
+  "version": "1.0.0",
+  "author": "eipi10",
+  "license": "MIT",
+  "description": "Live-previewed Hyprland touchpad settings with presets, safe persistence, and automatic rollback.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Touchpad.qml"
+  },
+  "barWidget": {
+    "displayName": "Touchpad",
+    "description": "Tune scrolling, clicking, dragging, typing protection, and touchpad-only pointer speed from one reversible panel.",
+    "category": "System",
+    "aliases": [
+      "trackpad",
+      "input"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {},
+    "schema": []
+  }
+}

@@ -17,6 +17,8 @@ panel restores the snapshot captured when the panel opened.
   physical clicks, tap-and-drag, and off/timeout/sticky drag lock.
 - **Control** contains typing protection and a per-touchpad pointer-speed
   slider. External mice are not changed.
+- **Sliders are drag-only.** Mouse-wheel and two-finger scroll events continue
+  moving the panel and never change a value under the pointer.
 - **Try it here** receives real post-libinput clicks and scroll events so a
   preview can be evaluated before saving.
 - **Omarchy defaults** removes only the plugin-managed override block; it does
@@ -84,6 +86,7 @@ For tests, `OMARCHY_TOUCHPAD_INPUT_FILE` can redirect the config target and
 
 - `j` / `k` or `↓` / `↑`: move between controls
 - `h` / `l` or `←` / `→`: adjust a slider or segmented choice
+- Pointer sliders change only while pressed/dragged; scrolling never changes them
 - `Enter` / `Space`: activate the selected control
 - `s`: save
 - `r`: rescan devices

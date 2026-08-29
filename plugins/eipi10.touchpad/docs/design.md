@@ -18,6 +18,8 @@ Three product principles drive the design:
    one marked config block; validation failure rolls the file back.
 3. **High-frequency settings only.** The panel remains scannable and avoids
    gesture policies that can silently conflict with the window manager.
+4. **Navigation never mutates.** Two-finger or wheel scrolling only moves the
+   panel. Sliders require an intentional pointer press/drag or keyboard input.
 
 The plugin deliberately does not expose a global “disable touchpad” switch.
 On a laptop without a mouse that is an easy lockout. It also avoids applying
@@ -86,6 +88,11 @@ Pointer and keyboard share one cursor model:
 - horizontal movement changes presets, sliders, and segmented choices;
 - Enter/Space activates;
 - Esc closes and rolls back unsaved runtime values.
+
+Pointer sliders intentionally reject wheel-based adjustment and pass those
+events to the surrounding Flickable. This prevents a common failure mode where
+someone scrolling through the panel accidentally changes whichever slider
+happens to be under the pointer.
 
 Hover updates the same keyboard cursor instead of creating a second focus
 model. Long device names elide in the hero. The panel uses a capped Flickable,

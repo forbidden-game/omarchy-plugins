@@ -89,7 +89,7 @@ BorderSurface {
       }
     }
 
-    PanelSlider {
+    DragOnlySlider {
       width: parent.width
       bar: root.bar
       value: root.value

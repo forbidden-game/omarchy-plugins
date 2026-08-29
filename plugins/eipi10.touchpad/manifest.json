@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "eipi10.touchpad",
   "name": "Touchpad",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "eipi10",
   "license": "MIT",
   "description": "Live-previewed Hyprland touchpad settings with presets, safe persistence, and automatic rollback.",

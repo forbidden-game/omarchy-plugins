@@ -10,6 +10,24 @@ SCRIPT = Path(__file__).parents[1] / "bin" / "omarchy-touchpad-ctl"
 MODULE = runpy.run_path(str(SCRIPT))
 
 
+class SliderInteractionTests(unittest.TestCase):
+    def test_setting_rows_use_the_drag_only_slider(self):
+        component = (
+            Path(__file__).parents[1] / "components" / "SettingSlider.qml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("DragOnlySlider {", component)
+        self.assertNotIn("PanelSlider {", component)
+
+    def test_scroll_events_pass_through_without_changing_values(self):
+        component = (
+            Path(__file__).parents[1] / "components" / "DragOnlySlider.qml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("wheel.accepted = false", component)
+        self.assertNotIn("angleDelta", component)
+
+
 class SettingsTests(unittest.TestCase):
     def test_sanitize_clamps_values_and_dependencies(self):
         sanitized = MODULE["sanitize_settings"](

@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "eipi10.battery-info",
   "name": "Battery info",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "eipi10",
-  "description": "Battery icon with live charging power and daily/weekly/monthly consumption.",
+  "description": "Battery flow, durable energy history, and Zhuhai electricity-cost estimates.",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "Battery info",
-    "description": "Battery icon, charging power, and daily/weekly/monthly battery consumption",
+    "description": "Battery flow, daily/weekly/monthly history, and electricity-cost estimates",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right"

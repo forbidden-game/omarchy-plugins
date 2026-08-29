@@ -32,11 +32,22 @@ Panel {
     readonly property bool chargeThresholdActive: Model.chargeThresholdActive(device, onBattery, upowerStates())
     readonly property bool batteryFlowIdle: fullyCharged || chargeThresholdActive
     readonly property bool charging: batteryPresent && !onBattery && !batteryFlowIdle
-    // UPower changeRate: positive while charging, negative while discharging.
-    readonly property real powerWatts: batteryPresent ? Number(device.changeRate || 0) : 0
-    readonly property bool hasPowerFlow: batteryPresent && Math.abs(powerWatts) >= 0.05
+    // UPower EnergyRate is an unsigned magnitude. Direction comes from the
+    // device state; treating the rate as signed used to label discharging as
+    // charging and point the arrow the wrong way.
+    readonly property real batteryRateWatts: batteryPresent ? Math.max(0, Number(device.changeRate || 0)) : 0
+    readonly property bool chargingFlow: batteryPresent && device.state === UPowerDeviceState.Charging && batteryRateWatts >= 0.05
+    readonly property bool dischargingFlow: batteryPresent && (onBattery || device.state === UPowerDeviceState.Discharging) && batteryRateWatts >= 0.05
+    readonly property bool hasPowerFlow: chargingFlow || dischargingFlow
     // ------------------------------------------------------------- settings
     readonly property bool showPercentage: setting("showPercentage", true) === true
+    // Standard Zhuhai one-household residential tariff. A household's other
+    // month-to-date use can be supplied as a baseline so this device crosses
+    // the same marginal tier as the electricity meter.
+    readonly property real configuredTariffBaseRate: Number(setting("tariffBaseRate", 0.60886875))
+    readonly property real configuredMonthlyBaselineKWh: Number(setting("monthlyBaselineKWh", 0))
+    readonly property real tariffBaseRate: isFinite(configuredTariffBaseRate) && configuredTariffBaseRate >= 0 ? configuredTariffBaseRate : 0.60886875
+    readonly property real monthlyBaselineKWh: isFinite(configuredMonthlyBaselineKWh) && configuredMonthlyBaselineKWh >= 0 ? configuredMonthlyBaselineKWh : 0
     // ------------------------------------------------------------- work mode
     // The machine's power profiles (power-saver / balanced / performance) are
     // listed through the omarchy helper, so switching here respects the same
@@ -50,12 +61,16 @@ Panel {
     property var dayBuckets: ({
     })
     property var lastSample: null
-    property var pendingLast: null
+    property var pendingBatteryLast: null
+    property var pendingRaplLast: null
     property bool historyReady: false
     property bool historyDirty: false
     property bool ipcOwner: false
     property real lastPersistTime: 0
     property string lastDayKey: ""
+    property string historyError: ""
+    property bool historyRecoveryStarted: false
+    property bool historyRecoveryDone: false
     // ------------------------------------------------------------- RAPL
     // Whole-machine draw is measurable through the RAPL platform (psys)
     // energy counter — it spans the CPU, the iGPU and the rest of the
@@ -76,8 +91,8 @@ Panel {
     property real sysPowerW: 0
     // Adapter supply: platform draw plus battery inflow. Only meaningful
     // while plugged in.
-    readonly property real adapterWatts: sysPowerW + (powerWatts > 0 ? powerWatts : 0)
-    readonly property real maxRaplDelta: 1e+11 // µJ ≈ 27.8 Wh; larger jumps are wraps/resets
+    readonly property real adapterWatts: sysPowerW + (chargingFlow ? batteryRateWatts : 0)
+    readonly property real maxRaplWatts: 300
     readonly property real systemToday: Model.sumRange(dayBuckets, Model.todayKey(), Model.todayKey(), "system")
     readonly property real systemWeek: Model.sumRange(dayBuckets, Model.weekStartKey(), Model.todayKey(), "system")
     readonly property real systemMonth: Model.sumRange(dayBuckets, Model.monthStartKey(), Model.todayKey(), "system")
@@ -89,6 +104,13 @@ Panel {
     readonly property real chargedToday: Model.sumRange(dayBuckets, Model.todayKey(), Model.todayKey(), "charged")
     readonly property real chargedWeek: Model.sumRange(dayBuckets, Model.weekStartKey(), Model.todayKey(), "charged")
     readonly property real chargedMonth: Model.sumRange(dayBuckets, Model.monthStartKey(), Model.todayKey(), "charged")
+    readonly property real costToday: Model.rangeElectricityCost(dayBuckets, Model.todayKey(), Model.todayKey(), "system", tariffBaseRate, monthlyBaselineKWh)
+    readonly property real costWeek: Model.rangeElectricityCost(dayBuckets, Model.weekStartKey(), Model.todayKey(), "system", tariffBaseRate, monthlyBaselineKWh)
+    readonly property real costMonth: Model.rangeElectricityCost(dayBuckets, Model.monthStartKey(), Model.todayKey(), "system", tariffBaseRate, monthlyBaselineKWh)
+    readonly property real monthTariffKWh: monthlyBaselineKWh + systemMonth / 1000
+    readonly property int tariffTier: Model.zhuhaiTier(monthTariffKWh, new Date())
+    readonly property real tariffMarginalRate: Model.zhuhaiMarginalRate(monthTariffKWh, new Date(), tariffBaseRate)
+    readonly property var recentDays: historyReady ? Model.recentDayRows(dayBuckets, 7, Model.todayKey(), "system", tariffBaseRate, monthlyBaselineKWh) : []
     // Panel power row: precise value. Plugged with no battery flow reads
     // "Charging power 0 W" — connected but not charging — instead of a bare
     // dash, so the zero is legible rather than looking like missing data.
@@ -96,13 +118,13 @@ Panel {
         if (!batteryPresent)
             return "Power flow";
 
-        if (powerWatts >= 0.05)
+        if (chargingFlow)
             return "Charging power";
 
-        if (powerWatts <= -0.05)
+        if (dischargingFlow)
             return "Discharge power";
 
-        return "Charging power";
+        return "Battery power";
     }
     // Adapter row: the supply the wall is actually delivering (system draw +
     // battery inflow), or a dash while on battery / counter unavailable.
@@ -116,11 +138,11 @@ Panel {
         if (!batteryPresent)
             return "\u2014";
 
-        if (powerWatts >= 0.05)
-            return "\u2191 " + Model.formatPower(powerWatts);
+        if (chargingFlow)
+            return "\u2191 " + Model.formatPower(batteryRateWatts);
 
-        if (powerWatts <= -0.05)
-            return "\u2193 " + Model.formatPower(-powerWatts);
+        if (dischargingFlow)
+            return "\u2193 " + Model.formatPower(batteryRateWatts);
 
         return "0 W";
     }
@@ -148,6 +170,20 @@ Panel {
         return Model.modeLabel(device, onBattery, upowerStates());
     }
 
+    function formatRangeWh(fromKey, toKey, field) {
+        if (!historyReady || !Model.hasRangeData(dayBuckets, fromKey, toKey, field))
+            return "\u2014";
+
+        return Model.formatWh(Model.sumRange(dayBuckets, fromKey, toKey, field));
+    }
+
+    function formatRangeCost(fromKey, toKey) {
+        if (!historyReady)
+            return "\u2014";
+
+        return Model.formatCurrency(Model.rangeElectricityCost(dayBuckets, fromKey, toKey, "system", tariffBaseRate, monthlyBaselineKWh));
+    }
+
     // Bar label: icon + percent + live power. Plugged in, the adapter supply
     // in watts is shown (RAPL platform draw + battery inflow); on battery the
     // discharge flow (↓) is shown instead.
@@ -160,13 +196,30 @@ Panel {
             label += " " + percent + "%";
 
         if (!onBattery)
-            label += raplAvailable && sysPowerW > 0 ? " " + Model.formatCompactPower(adapterWatts) : (hasPowerFlow ? " \u2191" + Model.formatCompactPower(powerWatts) : "");
-        else if (hasPowerFlow)
-            label += " \u2193" + Model.formatCompactPower(-powerWatts);
+            label += raplAvailable && sysPowerW > 0 ? " " + Model.formatCompactPower(adapterWatts) : (chargingFlow ? " \u2191" + Model.formatCompactPower(batteryRateWatts) : "");
+        else if (dischargingFlow)
+            label += " \u2193" + Model.formatCompactPower(batteryRateWatts);
         return label;
     }
 
     // ------------------------------------------------------------- sampling
+    function addAcrossDays(field, amount, startTimestamp, endTimestamp) {
+        var pieces = Model.splitAmountByDay(startTimestamp, endTimestamp, amount);
+        for (var i = 0; i < pieces.length; i++)
+            addToBucket(pieces[i].key, field, pieces[i].amount);
+
+    }
+
+    function batteryDeltaField(difference, previousState, currentState) {
+        if (difference < 0 && (previousState === "Discharging" || currentState === "Discharging"))
+            return "drained";
+
+        if (difference > 0 && (previousState === "Charging" || currentState === "Charging"))
+            return "charged";
+
+        return "";
+    }
+
     // UPower's display device can appear a beat after the widget is created,
     // so the load path only stashes state; the baseline and any catch-up gap
     // are applied on the first sample that sees a live device.
@@ -174,6 +227,7 @@ Panel {
         if (!batteryPresent || !historyReady)
             return ;
 
+        startHistoryRecovery();
         var energy = Number(device.energy || 0);
         if (energy <= 0)
             return ;
@@ -183,16 +237,16 @@ Panel {
         var cap = Number(device.energyCapacity || energy);
         // Attribute the energy gap since the last recorded sample — covers
         // shutdown/suspend and the window before the device came up.
-        if (pendingLast) {
-            var last = pendingLast;
-            pendingLast = null;
+        if (pendingBatteryLast) {
+            var last = pendingBatteryLast;
+            pendingBatteryLast = null;
             if (energy > 0 && Number(last.energy || 0) > 0) {
                 var gap = energy - Number(last.energy);
                 if (Math.abs(gap) > 0 && Math.abs(gap) <= cap) {
-                    if (state === "Discharging" && gap < 0)
-                        addToBucket(Model.todayKey(), "drained", -gap);
-                    else if (state === "Charging" && gap > 0)
-                        addToBucket(Model.todayKey(), "charged", gap);
+                    var gapField = batteryDeltaField(gap, String(last.state || ""), state);
+                    if (gapField)
+                        addAcrossDays(gapField, Math.abs(gap), Number(last.ts || now), now);
+
                 }
             }
         }
@@ -206,11 +260,10 @@ Panel {
         }
         var diff = energy - lastSample.energy;
         if (diff !== 0 && Math.abs(diff) <= cap) {
-            var key = Model.todayKey();
-            if (state === "Discharging" && diff < 0)
-                addToBucket(key, "drained", -diff);
-            else if (state === "Charging" && diff > 0)
-                addToBucket(key, "charged", diff);
+            var field = batteryDeltaField(diff, String(lastSample.state || ""), state);
+            if (field)
+                addAcrossDays(field, Math.abs(diff), lastSample.ts, now);
+
         }
         lastSample = {
             "ts": now,
@@ -227,10 +280,11 @@ Panel {
     function addToBucket(key, field, amount) {
         var buckets = Object.assign({
         }, dayBuckets);
-        var b = buckets[key] || {
+        var b = Object.assign({
             "drained": 0,
             "charged": 0
-        };
+        }, buckets[key] || {
+        });
         b[field] = Number(b[field] || 0) + amount;
         buckets[key] = b;
         dayBuckets = buckets;
@@ -255,17 +309,23 @@ Panel {
         var now = Date.now() / 1000;
         // First read after a restart: attribute the gap since the stored RAPL
         // baseline (covers time the shell was down) unless the counter reset.
-        if (raplLastUj <= 0 && pendingLast && Number(pendingLast.rapl || 0) > 0) {
-            var prev = Number(pendingLast.rapl);
-            if (uj >= prev && uj - prev <= maxRaplDelta)
-                addToBucket(Model.todayKey(), "system", (uj - prev) / 3.6e+09);
+        if (raplLastUj <= 0 && pendingRaplLast) {
+            var saved = pendingRaplLast;
+            pendingRaplLast = null;
+            var prev = Number(saved.rapl || 0);
+            var savedAt = Number(saved.ts || now);
+            var gapSeconds = Math.max(0, now - savedAt);
+            var maxGapUj = Math.max(5, gapSeconds) * maxRaplWatts * 1e+06;
+            if (prev > 0 && uj >= prev && uj - prev <= maxGapUj)
+                addAcrossDays("system", (uj - prev) / 3.6e+09, savedAt, now);
 
         }
         if (raplLastUj > 0) {
             var dUj = uj - raplLastUj;
             var dt = now - raplLastTime;
-            if (dUj > 0 && dUj <= maxRaplDelta && dt > 0) {
-                addToBucket(Model.todayKey(), "system", dUj / 3.6e+09);
+            var maxDeltaUj = Math.max(2, dt) * maxRaplWatts * 1e+06;
+            if (dUj > 0 && dUj <= maxDeltaUj && dt > 0) {
+                addAcrossDays("system", dUj / 3.6e+09, raplLastTime, now);
                 // Only trust the derived wattage on short deltas; a gap that
                 // spans a suspend would deflate the figure for no reason.
                 if (dt <= 60)
@@ -278,31 +338,35 @@ Panel {
         raplLastTime = now;
     }
 
-    // History file was (re)loaded: adopt the stored buckets and remember the
-    // last recorded sample; the gap to now is attributed by the first live
-    // sample (device may not be ready yet). Called once per file load.
+    // History file was loaded: validate before adopting it. Invalid state is
+    // left untouched on disk and surfaced in the panel instead of becoming an
+    // empty object that gets persisted over the user's history.
     function onHistoryLoaded(raw) {
-        var data = null;
-        try {
-            data = JSON.parse(String(raw || ""));
-        } catch (e) {
-            data = null;
+        var data = Model.parseHistory(raw);
+        if (!data.valid) {
+            historyError = data.error || "History could not be read";
+            console.warn("battery-info:", historyError, historyPath);
+            return ;
         }
-        dayBuckets = (data && data.days) || {
-        };
+
+        dayBuckets = data.days;
         lastDayKey = Model.todayKey();
-        pendingLast = (data && data.last) || null;
+        pendingBatteryLast = data.last;
+        pendingRaplLast = data.last ? Object.assign({
+        }, data.last) : null;
         // The RAPL baseline only means anything from the same counter node;
         // an old file written from another node (e.g. package → platform
         // switch) would attribute a bogus energy gap on the first read.
-        if (pendingLast && pendingLast.raplNode !== raplNode)
-            pendingLast = Object.assign({
-            }, pendingLast, {
+        if (pendingRaplLast && pendingRaplLast.raplNode !== raplNode)
+            pendingRaplLast = Object.assign({
+            }, pendingRaplLast, {
                 "rapl": 0
             });
 
+        historyError = "";
         historyReady = true;
         sample();
+        startHistoryRecovery();
     }
 
     // No history file yet (first run): start tracking from the current state.
@@ -310,18 +374,57 @@ Panel {
         dayBuckets = {
         };
         lastDayKey = Model.todayKey();
-        pendingLast = null;
+        pendingBatteryLast = null;
+        pendingRaplLast = null;
+        historyError = "";
         historyReady = true;
         sample();
+        startHistoryRecovery();
+    }
+
+    function onHistoryLoadFailed(error) {
+        if (error === FileViewError.FileNotFound) {
+            onHistoryFresh();
+            return ;
+        }
+
+        historyError = error === FileViewError.PermissionDenied ? "History permission denied" : "History could not be loaded";
+        console.warn("battery-info:", historyError, historyPath);
+    }
+
+    // UPower keeps coarse percentage/state history independently of this
+    // plugin. Use it once per load to fill missing or recorded-zero battery
+    // days; precise live Wh totals always win.
+    function startHistoryRecovery() {
+        if (!historyReady || !batteryPresent || historyRecoveryStarted)
+            return ;
+
+        historyRecoveryStarted = true;
+        var nativePath = String(device.nativePath || "BAT0").replace(/[^A-Za-z0-9_]/g, "_");
+        var objectPath = "/org/freedesktop/UPower/devices/battery_" + nativePath;
+        historyRecoveryProc.command = ["busctl", "--system", "--json=short", "call", "org.freedesktop.UPower", objectPath, "org.freedesktop.UPower.Device", "GetHistory", "suu", "charge", "3456000", "300"];
+        historyRecoveryProc.running = true;
+    }
+
+    function onHistoryRecovered(raw) {
+        historyRecoveryDone = true;
+        var recovered = Model.recoverUPowerHistory(raw, Number(device.energyCapacity || 0));
+        var merged = Model.mergeRecoveredBatteryHistory(dayBuckets, recovered);
+        if (!Model.historyChanged(dayBuckets, merged))
+            return ;
+
+        dayBuckets = merged;
+        historyDirty = true;
+        persist();
     }
 
     function persist() {
-        if (!ipcOwner || !historyReady || !lastSample)
+        if (!ipcOwner || !historyReady || !lastSample || writeProc.running)
             return ;
 
         historyDirty = false;
         lastPersistTime = Date.now() / 1000;
-        Model.pruneBuckets(dayBuckets, 40);
+        Model.pruneBuckets(dayBuckets, 400);
         var last = {
             "ts": lastSample.ts,
             "energy": lastSample.energy,
@@ -330,11 +433,11 @@ Panel {
             "raplNode": raplNode
         };
         var payload = JSON.stringify({
-            "version": 3,
+            "version": 4,
             "days": dayBuckets,
             "last": last
         });
-        writeProc.command = ["bash", "-c", "mkdir -p \"$1\" && tmp=\"$1/history.json.tmp\" && printf '%s' \"$2\" > \"$tmp\" && mv \"$tmp\" \"$1/history.json\"", "battery-info", historyDir, payload];
+        writeProc.command = ["bash", "-c", "mkdir -p \"$1\" && tmp=\"$1/history.json.tmp\" && if [ -f \"$1/history.json\" ]; then cp -p \"$1/history.json\" \"$1/history.json.bak\"; fi && printf '%s' \"$2\" > \"$tmp\" && mv \"$tmp\" \"$1/history.json\"", "battery-info", historyDir, payload];
         writeProc.running = true;
     }
 
@@ -469,13 +572,38 @@ Panel {
         atomicWrites: true
         printErrors: false
         onLoaded: root.onHistoryLoaded(text())
-        onLoadFailed: root.onHistoryFresh()
+        onLoadFailed: function(error) {
+            root.onHistoryLoadFailed(error);
+        }
     }
 
     Process {
         id: writeProc
 
         command: ["true"]
+        onExited: function(exitCode) {
+            if (exitCode !== 0) {
+                root.historyDirty = true;
+                root.historyError = "History could not be saved";
+            }
+        }
+    }
+
+    Process {
+        id: historyRecoveryProc
+
+        command: ["true"]
+        onExited: function(exitCode) {
+            root.historyRecoveryDone = true;
+            if (exitCode !== 0)
+                console.warn("battery-info: UPower history recovery failed");
+
+        }
+
+        stdout: StdioCollector {
+            waitForEnd: true
+            onStreamFinished: root.onHistoryRecovered(text)
+        }
     }
 
     Process {
@@ -559,7 +687,7 @@ Panel {
         text: root.buttonLabel()
         fontSize: Style.font.caption
         horizontalMargin: 6
-        tooltipText: root.batteryPresent ? root.percent + "%" + (root.onBattery ? " on battery" : " plugged in") + (root.hasPowerFlow ? " \u00b7 " + (root.powerWatts > 0 ? "\u2191" : "\u2193") + Model.formatCompactPower(Math.abs(root.powerWatts)) : "") + (root.onBattery ? "" : (root.raplAvailable && root.sysPowerW > 0 ? " \u00b7 adp " + Model.formatCompactPower(root.adapterWatts) : "")) + " \u00b7 today " + Model.formatWh(root.drainedToday) + " \u00b7 week " + Model.formatWh(root.drainedWeek) + " \u00b7 month " + Model.formatWh(root.drainedMonth) : ""
+        tooltipText: root.batteryPresent ? root.percent + "%" + (root.onBattery ? " on battery" : " plugged in") + (root.hasPowerFlow ? " \u00b7 " + (root.dischargingFlow ? "\u2193" : "\u2191") + Model.formatCompactPower(root.batteryRateWatts) : "") + (root.onBattery ? "" : (root.raplAvailable && root.sysPowerW > 0 ? " \u00b7 adp " + Model.formatCompactPower(root.adapterWatts) : "")) + " \u00b7 today " + Model.formatWh(root.systemToday) + " / " + Model.formatCurrency(root.costToday) : ""
         onPressed: function(b) {
             if (b === Qt.RightButton)
                 root.togglePercentage();
@@ -728,7 +856,7 @@ Panel {
 
                 }
 
-                // ---------- Consumption: system / battery used / battery charged ----
+                // ---------- Consumption, Zhuhai electricity, and daily history ----
                 PanelSeparator {
                     foreground: root.foreground
                 }
@@ -746,19 +874,24 @@ Panel {
                     Row {
                         id: consumHeader
 
-                        readonly property real cellW: (width - Style.space(56) - spacing * 3) / 3
+                        readonly property real cellW: (width - Style.space(48) - spacing * 4) / 4
 
                         width: parent.width
                         spacing: Style.space(8)
 
                         Item {
-                            width: Style.space(56)
+                            width: Style.space(48)
                             height: 1
                         }
 
                         ConsumHeader {
                             width: consumHeader.cellW
                             text: "System"
+                        }
+
+                        ConsumHeader {
+                            width: consumHeader.cellW
+                            text: "Cost"
                         }
 
                         ConsumHeader {
@@ -775,23 +908,68 @@ Panel {
 
                     ConsumRow {
                         period: "Today"
-                        system: Model.formatWh(root.systemToday)
-                        used: Model.formatWh(root.drainedToday)
-                        charged: Model.formatWh(root.chargedToday)
+                        system: root.formatRangeWh(Model.todayKey(), Model.todayKey(), "system")
+                        cost: root.formatRangeCost(Model.todayKey(), Model.todayKey())
+                        used: root.formatRangeWh(Model.todayKey(), Model.todayKey(), "drained")
+                        charged: root.formatRangeWh(Model.todayKey(), Model.todayKey(), "charged")
                     }
 
                     ConsumRow {
                         period: "Week"
-                        system: Model.formatWh(root.systemWeek)
-                        used: Model.formatWh(root.drainedWeek)
-                        charged: Model.formatWh(root.chargedWeek)
+                        system: root.formatRangeWh(Model.weekStartKey(), Model.todayKey(), "system")
+                        cost: root.formatRangeCost(Model.weekStartKey(), Model.todayKey())
+                        used: root.formatRangeWh(Model.weekStartKey(), Model.todayKey(), "drained")
+                        charged: root.formatRangeWh(Model.weekStartKey(), Model.todayKey(), "charged")
                     }
 
                     ConsumRow {
                         period: "Month"
-                        system: Model.formatWh(root.systemMonth)
-                        used: Model.formatWh(root.drainedMonth)
-                        charged: Model.formatWh(root.chargedMonth)
+                        system: root.formatRangeWh(Model.monthStartKey(), Model.todayKey(), "system")
+                        cost: root.formatRangeCost(Model.monthStartKey(), Model.todayKey())
+                        used: root.formatRangeWh(Model.monthStartKey(), Model.todayKey(), "drained")
+                        charged: root.formatRangeWh(Model.monthStartKey(), Model.todayKey(), "charged")
+                    }
+
+                    Text {
+                        width: parent.width
+                        topPadding: Style.space(4)
+                        text: "LAST 7 DAYS"
+                        color: root.foreground
+                        opacity: 0.5
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                        font.letterSpacing: 0.8
+                    }
+
+                    Repeater {
+                        model: root.recentDays
+
+                        ConsumRow {
+                            required property var modelData
+
+                            period: modelData.label + (modelData.batteryEstimated ? "*" : "")
+                            system: Model.formatWh(modelData.systemWh)
+                            cost: Model.formatCurrency(modelData.cost)
+                            used: Model.formatWh(modelData.drainedWh)
+                            charged: Model.formatWh(modelData.chargedWh)
+                        }
+                    }
+
+                    Text {
+                        width: parent.width
+                        text: {
+                            if (root.historyError)
+                                return root.historyError;
+
+                            var tariff = "Zhuhai \u00b7 " + Model.zhuhaiSeasonLabel(new Date()) + " tier " + root.tariffTier + " \u00b7 " + Model.formatRate(root.tariffMarginalRate);
+                            return tariff + " \u00b7 device estimate" + (root.monthlyBaselineKWh > 0 ? " \u00b7 baseline " + root.monthlyBaselineKWh.toFixed(1) + " kWh" : "") + "\n* recovered from UPower; system energy unavailable";
+                        }
+                        color: root.historyError ? Color.urgent : root.foreground
+                        opacity: root.historyError ? 1 : 0.55
+                        font.family: root.bar.fontFamily
+                        font.pixelSize: Style.font.caption
+                        wrapMode: Text.WordWrap
                     }
 
                 }
@@ -905,9 +1083,10 @@ Panel {
     component ConsumRow: Row {
         property string period: ""
         property string system: ""
+        property string cost: ""
         property string used: ""
         property string charged: ""
-        readonly property real cellW: (width - Style.space(56) - spacing * 3) / 3
+        readonly property real cellW: (width - Style.space(48) - spacing * 4) / 4
 
         width: parent.width
         spacing: Style.space(8)
@@ -923,6 +1102,11 @@ Panel {
 
         ConsumValue {
             width: cellW
+            text: cost
+        }
+
+        ConsumValue {
+            width: cellW
             text: used
         }
 
@@ -934,7 +1118,7 @@ Panel {
     }
 
     component ConsumPeriod: Text {
-        width: Style.space(56)
+        width: Style.space(48)
         color: root.foreground
         font.family: root.bar.fontFamily
         font.pixelSize: Style.font.bodySmall

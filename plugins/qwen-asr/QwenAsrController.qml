@@ -49,6 +49,7 @@ Item {
   property string authAccount: ""
   property int authPollCount: 0
   property bool serviceReady: false
+  property string recordingRecoveryReason: ""
   property int elapsedSec: 0
   property var recent: [] // [{time, text}] most recent first, max 10
 
@@ -240,6 +241,19 @@ Item {
     warmupProc.running = true
   }
 
+  function reconcileServiceRecording() {
+    if (daemonStatusProc.running) return
+    daemonStatusProc.command = [root.bridgeBinary, "daemon-status"]
+    daemonStatusProc.running = true
+  }
+
+  function cancelOrphanedRecording(reason) {
+    if (recordingRecoveryProc.running) return
+    root.recordingRecoveryReason = reason || "startup"
+    recordingRecoveryProc.command = [root.bridgeBinary, "record-cancel"]
+    recordingRecoveryProc.running = true
+  }
+
   function setAutoPaste(enabled) {
     root.autoPaste = enabled
     writeConfigKey("autoPaste", enabled ? "true" : "false", null)
@@ -350,6 +364,10 @@ Item {
     if (!ok || !result || result.status !== "recording") {
       var message = result ? String(result.message || "无法启动实时听写")
         : "Omarvoice 常驻服务没有返回有效结果"
+      if (result && result.code === "recording_busy") {
+        message = "检测到上次中断的录音，正在自动停止"
+        root.cancelOrphanedRecording("recording_busy")
+      }
       root.recPath = ""
       root.stopWhenReady = false
       root.fail(message + "；WAV 已保留", "recording")
@@ -826,6 +844,38 @@ Item {
   }
 
   Process {
+    id: daemonStatusProc
+    stdout: StdioCollector { waitForEnd: true }
+    onExited: function(code) {
+      var result = root.parseBridgeResult(daemonStatusProc.stdout.text)
+      if (code === 0 && result && result.recording === true) {
+        root.cancelOrphanedRecording("startup")
+      }
+    }
+  }
+
+  Process {
+    id: recordingRecoveryProc
+    stdout: StdioCollector { waitForEnd: true }
+    onExited: function(code) {
+      var reason = root.recordingRecoveryReason
+      root.recordingRecoveryReason = ""
+      var result = root.parseBridgeResult(recordingRecoveryProc.stdout.text)
+      if (code !== 0 || !result || result.status !== "cancelled") return
+      root.appendDiagnostic("orphan_recording_recovered", {
+        trigger: reason,
+        audio_bytes: Number(result.audio_bytes || 0)
+      })
+      root.notify(
+        "󰄬",
+        "Omarvoice 已恢复",
+        "上次中断的录音已停止；WAV 已保留",
+        "low"
+      )
+    }
+  }
+
+  Process {
     id: recordStartProc
     property string contextPath: ""
     stdout: StdioCollector { waitForEnd: true }
@@ -970,9 +1020,16 @@ Item {
 
   Component.onCompleted: {
     root.appendDiagnostic("plugin_loaded", { model: root.model })
+    root.reconcileServiceRecording()
     root.loadSettings()
     root.loadAuthStatus()
     root.loadShortcut()
     root.loadHistory()
+  }
+
+  Component.onDestruction: {
+    if (root.state === "arming" || root.state === "recording") {
+      Quickshell.execDetached([root.bridgeBinary, "record-cancel"])
+    }
   }
 }

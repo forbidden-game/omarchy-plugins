@@ -50,7 +50,8 @@ LIVE_PCM_CHUNK_BYTES = 6_400  # 200 ms of signed 16-bit, 16 kHz mono PCM.
 PCM_BYTES_PER_SECOND = 32_000
 SPEECH_RMS_THRESHOLD = 1_843  # -25 dBFS, matching the former ffmpeg probe.
 MIN_AUDIO_MS = 1_000
-DAEMON_PROTOCOL_VERSION = 8
+MAX_RECORDING_SECONDS = 300
+DAEMON_PROTOCOL_VERSION = 9
 HTTPS_PORT_PATTERN = re.compile(r"listening on random port at (\d+) for HTTPS")
 DEFAULT_RECOGNITION_PROFILE = (
     "1. 用户主要处于中国大陆中文语境。识别时优先采用符合中国语境的网络热词、"
@@ -715,6 +716,7 @@ class LiveRecording:
         self.recorder: subprocess.Popen[bytes] | None = None
         self.capture_thread: threading.Thread | None = None
         self.cloud_thread: threading.Thread | None = None
+        self.timeout_thread: threading.Thread | None = None
         self.done = threading.Event()
         self.release_at = 0.0
         self.started_at = 0.0
@@ -767,6 +769,12 @@ class LiveRecording:
         )
         self.capture_thread.start()
         self.cloud_thread.start()
+        self.timeout_thread = threading.Thread(
+            target=self._enforce_duration_limit,
+            name="omarvoice-recording-timeout",
+            daemon=True,
+        )
+        self.timeout_thread.start()
         return {
             "status": "recording",
             "ready": True,
@@ -774,6 +782,11 @@ class LiveRecording:
             "wav_path": str(self.wav_path),
             "start_ms": round((time.monotonic() - self.started_at) * 1000),
         }
+
+    def _enforce_duration_limit(self) -> None:
+        """Stop capture if its UI owner disappears without releasing it."""
+        if not self.done.wait(timeout=MAX_RECORDING_SECONDS):
+            self.request_stop()
 
     def _capture_audio(self) -> None:
         recorder = self.recorder
@@ -1046,14 +1059,24 @@ class OmarvoiceDaemon:
         self.recording: LiveRecording | None = None
         self.server: socketserver.UnixStreamServer | None = None
 
+    def _active_recording_locked(self) -> LiveRecording | None:
+        """Return the active recording and forget one already finalized."""
+        recording = self.recording
+        if recording and recording.done.is_set():
+            self.recording = None
+            return None
+        return recording
+
     def dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
         command = str(request.get("command") or "")
         if command == "ping":
+            with self._recording_lock:
+                recording = self._active_recording_locked()
             return {
                 "status": "ready",
                 "ready": True,
                 "protocol_version": DAEMON_PROTOCOL_VERSION,
-                "recording": bool(self.recording and not self.recording.done.is_set()),
+                "recording": recording is not None,
             }
         if command == "warmup":
             _, timings = self.engine.ensure_ready(force_auth_sync=True)
@@ -1080,7 +1103,7 @@ class OmarvoiceDaemon:
         if not raw_path:
             raise BridgeError("recording_missing", "未指定录音文件路径")
         with self._recording_lock:
-            if self.recording:
+            if self._active_recording_locked():
                 raise BridgeError("recording_busy", "Omarvoice 已有录音正在进行")
             recording = LiveRecording(
                 self.engine,

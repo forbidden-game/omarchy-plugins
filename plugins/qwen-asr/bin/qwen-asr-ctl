@@ -8,6 +8,29 @@ import subprocess
 CONF_DIR = os.path.expanduser("~/.config/XiezhaoPan")
 CONF_FILE = os.path.join(CONF_DIR, "qwen-asr-qt.conf")
 BINDINGS_FILE = os.path.expanduser("~/.config/hypr/bindings.lua")
+MANAGED_BINDING_RE = re.compile(
+    r'(?:^[ \t]*--[^\n]*(?:Qwen ASR|Omarvoice) push-to-talk[^\n]*\n)?'
+    r'^[ \t]*o\.bind\([^\n]*["\']omarchy-shell qwen-asr start["\'][^\n]*\)\n'
+    r'^[ \t]*o\.bind\([^\n]*["\']omarchy-shell qwen-asr stop["\'][^\n]*\)[ \t]*\n?',
+    re.MULTILINE,
+)
+
+
+def replace_managed_bindings(content, new_key):
+    """Replace every legacy Omarvoice binding pair with one canonical pair."""
+    primary_block = (
+        f'-- Omarvoice push-to-talk (hold to record, release to transcribe).\n'
+        f'o.bind("{new_key}", "Start recording (Omarvoice push-to-talk)", "omarchy-shell qwen-asr start")\n'
+        f'o.bind("{new_key}", "Stop recording (Omarvoice push-to-talk)", "omarchy-shell qwen-asr stop", {{ release = true }})'
+    )
+    first = MANAGED_BINDING_RE.search(content)
+    if not first:
+        return content.rstrip() + "\n\n" + primary_block + "\n"
+
+    prefix = content[:first.start()].rstrip()
+    suffix = MANAGED_BINDING_RE.sub("", content[first.start():]).strip("\n")
+    sections = [section for section in (prefix, primary_block, suffix) if section]
+    return "\n\n".join(sections) + "\n"
 
 def get_shortcut():
     if os.path.exists(BINDINGS_FILE):
@@ -50,22 +73,7 @@ def set_shortcut(new_key):
     else:
         content = "-- Hyprland personal bindings\n"
 
-    primary_block = (
-        f'-- Omarvoice push-to-talk (hold to record, release to transcribe).\n'
-        f'o.bind("{new_key}", "Start recording (Omarvoice push-to-talk)", "omarchy-shell qwen-asr start")\n'
-        f'o.bind("{new_key}", "Stop recording (Omarvoice push-to-talk)", "omarchy-shell qwen-asr stop", {{ release = true }})'
-    )
-
-    # Match the managed block across the old and new display names.
-    qwen_block_regex = r'-- (?:Qwen ASR|Omarvoice) push-to-talk[^\n]*\n\s*o\.bind\([^\n]+qwen-asr start[^\n]*\)\n\s*o\.bind\([^\n]+qwen-asr stop[^\n]*\)'
-    general_qwen_regex = r'o\.bind\(\s*["\'][^"\']+["\']\s*,\s*["\'][^"\']*Start recording \((?:Qwen ASR|Omarvoice)[^\n]*\)\n\s*o\.bind\(\s*["\'][^"\']+["\']\s*,\s*["\'][^"\']*Stop recording \((?:Qwen ASR|Omarvoice)[^\n]*\)'
-
-    if re.search(qwen_block_regex, content):
-        new_content = re.sub(qwen_block_regex, primary_block, content, count=1)
-    elif re.search(general_qwen_regex, content):
-        new_content = re.sub(general_qwen_regex, primary_block, content, count=1)
-    else:
-        new_content = content.rstrip() + "\n\n" + primary_block + "\n"
+    new_content = replace_managed_bindings(content, new_key)
 
     try:
         tmp_file = BINDINGS_FILE + ".tmp"

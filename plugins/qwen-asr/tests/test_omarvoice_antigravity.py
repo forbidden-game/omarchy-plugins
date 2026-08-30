@@ -261,6 +261,35 @@ class LiveServiceTests(unittest.TestCase):
         self.assertTrue(recording.stop_requested)
         self.assertIsNone(daemon.recording)
 
+    def test_duration_limit_stops_capture_when_ui_never_releases(self):
+        recording = bridge.LiveRecording(mock.Mock(), Path("/tmp/timeout.wav"))
+
+        with mock.patch.object(bridge, "MAX_RECORDING_SECONDS", 0):
+            with mock.patch.object(recording, "request_stop") as request_stop:
+                recording._enforce_duration_limit()
+
+        request_stop.assert_called_once_with()
+
+    def test_new_recording_replaces_one_already_finalized(self):
+        daemon = bridge.OmarvoiceDaemon()
+        finished = mock.Mock()
+        finished.done = mock.Mock()
+        finished.done.is_set.return_value = True
+        daemon.recording = finished
+        replacement = mock.Mock()
+        replacement.start.return_value = {
+            "status": "recording",
+            "ready": True,
+        }
+
+        with mock.patch.object(
+            bridge, "LiveRecording", return_value=replacement
+        ):
+            result = daemon._start_recording({"wav_path": "/tmp/new.wav"})
+
+        self.assertEqual(result["status"], "recording")
+        self.assertIs(daemon.recording, replacement)
+
     def test_cloud_final_wins_when_local_rms_is_low(self):
         stream = BytesIO(
             bridge.encode_frame({"ready": {"sessionId": "session-1"}})

@@ -76,6 +76,9 @@ automatically.
 - The default global push-to-talk shortcut is `F9`; keyboard combinations and
   supported mouse buttons can be captured in the panel.
 - Turn off **自动直接上屏** to copy without pasting.
+- If Omarchy Shell reloads during capture, Omarvoice stops the detached
+  recording and keeps its recovery WAV. A five-minute service-side limit is
+  the final guard against an indefinitely open microphone.
 - IPC compatibility is unchanged:
 
 ```bash

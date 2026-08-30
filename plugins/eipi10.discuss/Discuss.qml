@@ -23,6 +23,7 @@ Item {
   property string statusKind: "info"
   property string consumeError: ""
   property string copyError: ""
+  property string pendingCopySnapshot: ""
 
   readonly property string home: Quickshell.env("HOME") || ""
   readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || home + "/.local/state"
@@ -209,6 +210,13 @@ Item {
     }, null, 2) + "\n"
   }
 
+  function serializedSnapshot() {
+    return JSON.stringify({
+      schemaVersion: 1,
+      entries: entries
+    })
+  }
+
   function secureDraft() {
     if (!draftPermissions.running) draftPermissions.running = true
   }
@@ -224,9 +232,11 @@ Item {
     confirming = true
     confirmCount = entries.length
     copyError = ""
+    pendingCopySnapshot = serializedSnapshot()
     saveDebounce.stop()
-    draftFile.setText(serializedDraft())
+    saveNow()
     showStatus("正在整理并复制本轮…", "info")
+    copyProcess.running = true
   }
 
   function finishCopy() {
@@ -235,6 +245,7 @@ Item {
     deferredRecords = []
     confirming = false
     confirmCount = 0
+    pendingCopySnapshot = ""
     expandedHistoryIndex = -1
     var nextRound = []
     for (var i = 0; i < waiting.length; i++) {
@@ -255,6 +266,7 @@ Item {
     deferredRecords = []
     confirming = false
     confirmCount = 0
+    pendingCopySnapshot = ""
     if (waiting.length > 0) {
       var merged = entries.slice()
       for (var i = 0; i < waiting.length; i++) {
@@ -294,6 +306,17 @@ Item {
     onTriggered: root.statusText = ""
   }
 
+  Timer {
+    id: copyWatchdog
+    interval: 7000
+    repeat: false
+    running: root.confirming
+    onTriggered: {
+      if (copyProcess.running) copyProcess.signal(15)
+      root.failCopy("复制超时，当前轮次仍然保留")
+    }
+  }
+
   Process {
     id: ensureStateDirectory
     running: false
@@ -331,7 +354,13 @@ Item {
   Process {
     id: copyProcess
     running: false
-    command: [root.controlPath, "copy", root.draftPath]
+    command: [root.controlPath, "copy-stdin"]
+    stdinEnabled: true
+
+    onStarted: {
+      write(root.pendingCopySnapshot + "\n")
+      root.pendingCopySnapshot = ""
+    }
 
     stderr: StdioCollector {
       waitForEnd: true
@@ -339,6 +368,7 @@ Item {
     }
 
     onExited: function(exitCode) {
+      if (!root.confirming) return
       if (exitCode === 0) root.finishCopy()
       else root.failCopy(root.copyError || "复制失败，草稿仍然保留")
     }
@@ -359,14 +389,12 @@ Item {
     }
     onSaved: {
       root.secureDraft()
-      if (root.confirming && !copyProcess.running) {
-        root.copyError = ""
-        copyProcess.running = true
-      }
     }
     onSaveFailed: function(_error) {
-      if (root.confirming) root.failCopy("无法保存草稿，尚未写入剪贴板")
-      else root.showStatus("草稿保存失败", "error")
+      if (root.confirming)
+        root.showStatus("草稿保存失败；内存快照复制仍会继续", "error")
+      else
+        root.showStatus("草稿保存失败", "error")
     }
   }
 

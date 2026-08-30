@@ -193,6 +193,17 @@ def load_draft(path_text: str) -> list[dict[str, object]]:
     return entries
 
 
+def load_snapshot(raw: str) -> list[dict[str, object]]:
+    try:
+        snapshot = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise DiscussError("内存快照损坏或不可读") from error
+    entries = snapshot.get("entries") if isinstance(snapshot, dict) else None
+    if not isinstance(entries, list):
+        raise DiscussError("内存快照中没有可复制的讨论")
+    return entries
+
+
 def quote_markdown(text: str) -> str:
     lines = text.splitlines() or [""]
     return "\n".join("> " + line if line else ">" for line in lines)
@@ -288,6 +299,17 @@ def command_copy(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_copy_stdin(_args: argparse.Namespace) -> int:
+    snapshot = sys.stdin.readline()
+    if not snapshot:
+        raise DiscussError("没有收到内存快照")
+    entries = load_snapshot(snapshot)
+    copy_to_clipboard(format_markdown(entries))
+    json.dump({"ok": True, "count": len(entries)}, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="discuss-ctl")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -306,6 +328,12 @@ def build_parser() -> argparse.ArgumentParser:
     copy_parser = subparsers.add_parser("copy", help="copy a formatted draft to the clipboard")
     copy_parser.add_argument("path")
     copy_parser.set_defaults(handler=command_copy)
+
+    copy_stdin_parser = subparsers.add_parser(
+        "copy-stdin",
+        help="copy a one-line JSON snapshot received over stdin",
+    )
+    copy_stdin_parser.set_defaults(handler=command_copy_stdin)
 
     return parser
 

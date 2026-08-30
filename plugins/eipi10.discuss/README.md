@@ -9,9 +9,10 @@ selection 02 → your discussion 02
 ...
 ```
 
-It does not call an AI service. Clicking **确认本轮 · 复制** writes the complete
-round to the clipboard as readable Markdown and starts a fresh round. The final
-discussion may be empty.
+It does not call an AI service. Clicking **确认本轮 · 复制** freezes the current
+round as an in-memory snapshot, writes it to the clipboard as readable Markdown,
+and starts a fresh round. Clipboard export does not wait for draft persistence.
+The final discussion may be empty.
 
 ## Interaction
 

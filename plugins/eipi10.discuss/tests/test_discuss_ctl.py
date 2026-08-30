@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -133,6 +134,76 @@ class DiscussControlTests(unittest.TestCase):
             check=True,
             timeout=5.0,
         )
+
+    def test_copy_stdin_consumes_one_line_memory_snapshot(self):
+        snapshot = json.dumps(
+            {
+                "schemaVersion": 1,
+                "entries": [
+                    {
+                        "text": "选区来自内存",
+                        "discussion": "不再等待草稿保存事件",
+                        "sourceClass": "app",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        output = io.StringIO()
+
+        with (
+            mock.patch.object(ctl.sys, "stdin", io.StringIO(snapshot + "\n")),
+            mock.patch.object(ctl.sys, "stdout", output),
+            mock.patch.object(ctl, "copy_to_clipboard") as copy,
+        ):
+            exit_code = ctl.command_copy_stdin(mock.Mock())
+
+        self.assertEqual(exit_code, 0)
+        copied_text = copy.call_args.args[0]
+        self.assertIn("> 选区来自内存", copied_text)
+        self.assertIn("**我的讨论：**\n不再等待草稿保存事件", copied_text)
+        self.assertEqual(json.loads(output.getvalue()), {"ok": True, "count": 1})
+
+    def test_copy_stdin_rejects_missing_snapshot(self):
+        with mock.patch.object(ctl.sys, "stdin", io.StringIO("")):
+            with self.assertRaisesRegex(ctl.DiscussError, "没有收到"):
+                ctl.command_copy_stdin(mock.Mock())
+
+    def test_copy_stdin_cli_streams_snapshot_without_touching_draft(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            temporary = Path(temporary_dir)
+            clipboard_capture = temporary / "clipboard.txt"
+            fake_wl_copy = temporary / "wl-copy"
+            fake_wl_copy.write_text(
+                '#!/bin/sh\ncat > "$DISCUSS_CAPTURE_PATH"\n',
+                encoding="utf-8",
+            )
+            fake_wl_copy.chmod(0o755)
+            snapshot = json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "entries": [{"text": "snapshot", "discussion": "direct"}],
+                }
+            )
+
+            completed = subprocess.run(
+                [str(CONTROL), "copy-stdin"],
+                input=snapshot + "\n",
+                env={
+                    **os.environ,
+                    "PATH": str(temporary) + os.pathsep + os.environ["PATH"],
+                    "DISCUSS_CAPTURE_PATH": str(clipboard_capture),
+                },
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            copied = clipboard_capture.read_text(encoding="utf-8")
+
+        self.assertEqual(json.loads(completed.stdout), {"ok": True, "count": 1})
+        self.assertIn("> snapshot", copied)
+        self.assertIn("**我的讨论：**\ndirect", copied)
 
 
 if __name__ == "__main__":

@@ -15,8 +15,9 @@ import qs.Ui
 // $XDG_STATE_HOME/omarchy/battery-info/history.json so the totals survive
 // shell restarts; the gap since the last recorded sample is attributed on
 // load so suspend/off time is not lost. One bar surface per monitor exists,
-// so only the instance that owns the IPC target writes the file (identical
-// sampled data plus an atomic rename keep even a transient race benign).
+// so the instance on Quickshell's first screen owns persistence. A file lock
+// and per-write temporary file also protect the brief generation overlap
+// during hot reloads.
 Panel {
     id: root
 
@@ -65,12 +66,14 @@ Panel {
     property var pendingRaplLast: null
     property bool historyReady: false
     property bool historyDirty: false
-    property bool ipcOwner: false
     property real lastPersistTime: 0
     property string lastDayKey: ""
     property string historyError: ""
+    property string historyWriteErrorDetail: ""
     property bool historyRecoveryStarted: false
     property bool historyRecoveryDone: false
+    readonly property var hostScreen: root.QsWindow.window ? root.QsWindow.window.screen : null
+    readonly property bool historyOwner: !!(hostScreen && Quickshell.screens.length > 0 && hostScreen === Quickshell.screens[0])
     // ------------------------------------------------------------- RAPL
     // Whole-machine draw is measurable through the RAPL platform (psys)
     // energy counter — it spans the CPU, the iGPU and the rest of the
@@ -98,6 +101,7 @@ Panel {
     readonly property real systemMonth: Model.sumRange(dayBuckets, Model.monthStartKey(), Model.todayKey(), "system")
     readonly property string historyDir: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state") + "/omarchy/battery-info"
     readonly property string historyPath: historyDir + "/history.json"
+    readonly property string historyWriterPath: decodeURIComponent(String(Qt.resolvedUrl("persist-history.sh")).replace("file://", ""))
     readonly property real drainedToday: Model.sumRange(dayBuckets, Model.todayKey(), Model.todayKey(), "drained")
     readonly property real drainedWeek: Model.sumRange(dayBuckets, Model.weekStartKey(), Model.todayKey(), "drained")
     readonly property real drainedMonth: Model.sumRange(dayBuckets, Model.monthStartKey(), Model.todayKey(), "drained")
@@ -419,7 +423,7 @@ Panel {
     }
 
     function persist() {
-        if (!ipcOwner || !historyReady || !lastSample || writeProc.running)
+        if (!historyOwner || !historyReady || !lastSample || writeProc.running)
             return ;
 
         historyDirty = false;
@@ -437,7 +441,7 @@ Panel {
             "days": dayBuckets,
             "last": last
         });
-        writeProc.command = ["bash", "-c", "mkdir -p \"$1\" && tmp=\"$1/history.json.tmp\" && if [ -f \"$1/history.json\" ]; then cp -p \"$1/history.json\" \"$1/history.json.bak\"; fi && printf '%s' \"$2\" > \"$tmp\" && mv \"$tmp\" \"$1/history.json\"", "battery-info", historyDir, payload];
+        writeProc.command = ["bash", historyWriterPath, historyDir, payload];
         writeProc.running = true;
     }
 
@@ -535,6 +539,11 @@ Panel {
     IpcHandler {
         id: ipc
 
+        // IpcHandler.enabled is a requested state, not proof that this handler
+        // won a duplicate target. Use the same deterministic screen owner as
+        // persistence so multi-monitor bars register exactly one handler.
+        enabled: root.historyOwner
+
         function open() {
             root.open();
         }
@@ -560,8 +569,6 @@ Panel {
         }
 
         target: "eipi10.battery-info"
-        Component.onCompleted: root.ipcOwner = enabled
-        onEnabledChanged: root.ipcOwner = enabled
     }
 
     FileView {
@@ -581,11 +588,22 @@ Panel {
         id: writeProc
 
         command: ["true"]
+        onStarted: root.historyWriteErrorDetail = ""
         onExited: function(exitCode) {
-            if (exitCode !== 0) {
-                root.historyDirty = true;
-                root.historyError = "History could not be saved";
+            if (exitCode === 0) {
+                if (root.historyError === "History could not be saved")
+                    root.historyError = "";
+
+                return ;
             }
+
+            root.historyDirty = true;
+            root.historyError = "History could not be saved";
+            console.warn("battery-info:", root.historyError, root.historyWriteErrorDetail || ("exit " + exitCode), root.historyPath);
+        }
+        stderr: StdioCollector {
+            waitForEnd: true
+            onStreamFinished: root.historyWriteErrorDetail = String(text || "").trim()
         }
     }
 

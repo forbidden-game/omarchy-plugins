@@ -14,7 +14,8 @@ shell.
   days. Missing observations are shown as `—`; a measured zero stays `0 Wh`.
 - Persists 400 days in
   `$XDG_STATE_HOME/omarchy/battery-info/history.json`, using atomic writes and
-  a `history.json.bak` safety copy.
+  a `history.json.bak` safety copy. Multi-monitor instances and hot-reload
+  generations are serialized so they cannot race over one temporary file.
 - Refuses to overwrite malformed or unreadable history.
 - Uses UPower's retained percentage history to recover up to 40 days of
   approximate charge/discharge data. Recovered rows are marked `*`; past
@@ -70,6 +71,7 @@ meter or electricity account.
 
 ```bash
 node plugins/eipi10.battery-info/tests/model.test.js
+bash plugins/eipi10.battery-info/tests/persist-history.test.sh
 omarchy plugin validate plugins/eipi10.battery-info
 ```
 

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "eipi10.battery-info",
   "name": "Battery info",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "eipi10",
   "description": "Battery flow, durable energy history, and Zhuhai electricity-cost estimates.",
   "kinds": [

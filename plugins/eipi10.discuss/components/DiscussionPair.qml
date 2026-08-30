@@ -26,8 +26,8 @@ Item {
   function sourceLabel() {
     var sourceClass = String(entry.sourceClass || "").trim()
     var sourceTitle = String(entry.sourceTitle || "").trim()
-    if (sourceClass && sourceTitle) return sourceClass + " · " + sourceTitle
-    return sourceTitle || sourceClass || "未知来源"
+    if (sourceClass && sourceTitle) return sourceClass + " / " + sourceTitle
+    return sourceTitle || sourceClass || "UNKNOWN"
   }
 
   function preview(text) {
@@ -89,10 +89,11 @@ Item {
 
           Text {
             Layout.fillWidth: true
-            text: "引用 · " + root.sourceLabel()
+            text: "REF // " + root.sourceLabel()
             color: root.muted
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
+            font.letterSpacing: Style.spaceReal(0.7)
             elide: Text.ElideRight
           }
 
@@ -108,7 +109,7 @@ Item {
 
           Text {
             Layout.fillWidth: true
-            text: root.preview(root.entry.discussion) || "讨论留空"
+            text: root.preview(root.entry.discussion) || "NOTE // NULL"
             color: root.muted
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -117,10 +118,11 @@ Item {
         }
 
         Text {
-          text: "展开"
+          text: "OPEN"
           color: root.accent
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
+          font.letterSpacing: Style.spaceReal(0.7)
         }
       }
 
@@ -193,20 +195,22 @@ Item {
 
               Text {
                 Layout.fillWidth: true
-                text: "引用 · " + root.sourceLabel()
+                text: "REF // " + root.sourceLabel()
                 color: root.accent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
+                font.letterSpacing: Style.spaceReal(0.7)
                 elide: Text.ElideRight
               }
 
               Text {
                 visible: !root.current
-                text: "收起"
+                text: "CLOSE"
                 color: root.muted
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
+                font.letterSpacing: Style.spaceReal(0.7)
 
                 MouseArea {
                   anchors.fill: parent
@@ -230,10 +234,11 @@ Item {
             Text {
               visible: root.entry.truncated === true
               width: parent.width
-              text: "选区过长，已保留前 200,000 个字符"
+              text: "TRUNCATED // 200K LIMIT"
               color: Color.urgent
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
+              font.letterSpacing: Style.spaceReal(0.7)
               wrapMode: Text.WordWrap
             }
           }
@@ -244,11 +249,12 @@ Item {
           spacing: Style.space(5)
 
           Text {
-            text: root.current ? "我的讨论 · 当前" : "我的讨论"
+            text: root.current ? "NOTE // LIVE" : "NOTE // ARCHIVE"
             color: root.current ? root.accent : root.muted
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             font.bold: root.current
+            font.letterSpacing: Style.spaceReal(0.7)
           }
 
           TextArea {
@@ -256,7 +262,7 @@ Item {
             width: parent.width
             height: Math.max(Style.space(88), contentHeight + topPadding + bottomPadding)
             text: String(root.entry.discussion || "")
-            placeholderText: "对这段内容写下评价、疑问或联想；最后一项可以留空…"
+            placeholderText: "INPUT NOTE..."
             placeholderTextColor: root.muted
             color: root.foreground
             selectionColor: Style.selectionFillFor(root.foreground, root.accent)

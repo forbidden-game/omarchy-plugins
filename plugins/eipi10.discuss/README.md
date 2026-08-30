@@ -9,10 +9,10 @@ selection 02 → your discussion 02
 ...
 ```
 
-It does not call an AI service. Clicking **确认本轮 · 复制** freezes the current
+It does not call an AI service. Clicking **COPY // NN** freezes the current
 round as an in-memory snapshot, writes it to the clipboard as readable Markdown,
-and starts a fresh round. Clipboard export does not wait for draft persistence.
-The final discussion may be empty.
+starts a fresh round, and closes the window immediately. Clipboard export does
+not wait for draft persistence. The final discussion may be empty.
 
 ## Interaction
 
@@ -20,12 +20,12 @@ The final discussion may be empty.
 2. Press `Super + D`.
 3. Write a comment in the current pair.
 4. Select more text elsewhere and press `Super + D` again.
-5. Click **确认本轮 · 复制** or press `Ctrl + Enter`.
+5. Click **COPY // NN** or press `Ctrl + Enter`.
 
 Every new capture collapses the previous pair and keeps the newest pair open.
 One historical pair can be expanded at a time. The footer remains fixed while
-the pair list scrolls inside the resizable window. `Esc` and **隐藏** only hide
-the window; they do not discard the draft.
+the pair list scrolls inside the resizable window. `Esc` and the **ESC** header
+action hide the window without discarding the draft.
 
 ## Installation
 

@@ -14,15 +14,12 @@ Item {
   property bool closingFromHost: false
   property bool draftHydrated: false
   property bool confirming: false
-  property int confirmCount: 0
   property int expandedHistoryIndex: -1
   property var entries: []
   property var captureQueue: []
   property var deferredRecords: []
   property string statusText: ""
   property string statusKind: "info"
-  property string consumeError: ""
-  property string copyError: ""
   property string pendingCopySnapshot: ""
 
   readonly property string home: Quickshell.env("HOME") || ""
@@ -47,12 +44,12 @@ Item {
       try {
         payload = JSON.parse(String(payloadJson))
       } catch (error) {
-        showStatus("呼出参数无法解析", "error")
+        showStatus("BAD SUMMON", "error")
       }
     }
 
     if (payload && payload.error) {
-      showStatus(payload.message || "没有读到当前选区；请先选中文字", "error")
+      showStatus(payload.error === "no_selection" ? "NO SELECTION" : "CAPTURE FAIL", "error")
     } else if (payload && typeof payload.path === "string") {
       enqueueCapture(payload.path)
     }
@@ -80,6 +77,11 @@ Item {
     statusTimer.restart()
   }
 
+  function counter(value) {
+    var number = Math.max(0, Number(value || 0))
+    return number < 10 ? "0" + number : String(number)
+  }
+
   function enqueueCapture(path) {
     captureQueue = captureQueue.concat([path])
     runNextCapture()
@@ -89,7 +91,6 @@ Item {
     if (consumeProcess.running || captureQueue.length === 0) return
     var nextPath = captureQueue[0]
     captureQueue = captureQueue.slice(1)
-    consumeError = ""
     consumeProcess.command = [controlPath, "consume", nextPath]
     consumeProcess.running = true
   }
@@ -99,11 +100,11 @@ Item {
     try {
       record = JSON.parse(String(raw || ""))
     } catch (error) {
-      showStatus("选区记录无法解析", "error")
+      showStatus("BAD CAPTURE", "error")
       return
     }
     if (!record || typeof record.text !== "string" || !record.text.trim()) {
-      showStatus("没有读到有效选区", "error")
+      showStatus("NO SELECTION", "error")
       return
     }
     record.discussion = ""
@@ -125,14 +126,14 @@ Item {
   function appendRecord(record) {
     var previous = entries.length > 0 ? entries[entries.length - 1] : null
     if (isDuplicate(previous, record)) {
-      showStatus("已忽略一次重复呼出", "info")
+      showStatus("DUPLICATE", "info")
       return
     }
 
     expandedHistoryIndex = -1
     entries = entries.concat([record])
     saveNow()
-    showStatus("已加入第 " + entries.length + " 组选区", "info")
+    showStatus("CAPTURE // " + counter(entries.length), "info")
     Qt.callLater(function() {
       scrollToBottom()
       focusCurrentEditor()
@@ -149,13 +150,13 @@ Item {
       if (!isDuplicate(previous, waiting[i])) merged.push(waiting[i])
     }
     if (merged.length === entries.length) {
-      showStatus("已忽略一次重复呼出", "info")
+      showStatus("DUPLICATE", "info")
       return
     }
     expandedHistoryIndex = -1
     entries = merged
     saveNow()
-    showStatus("已加入第 " + entries.length + " 组选区", "info")
+    showStatus("CAPTURE // " + counter(entries.length), "info")
     Qt.callLater(function() {
       scrollToBottom()
       focusCurrentEditor()
@@ -184,7 +185,7 @@ Item {
         })
       }
     } catch (error) {
-      if (String(raw || "").trim()) showStatus("草稿损坏，已从空白轮次继续", "error")
+      if (String(raw || "").trim()) showStatus("DRAFT RESET", "error")
     }
     entries = restored
     draftHydrated = true
@@ -230,21 +231,17 @@ Item {
   function confirmRound() {
     if (confirming || entries.length === 0) return
     confirming = true
-    confirmCount = entries.length
-    copyError = ""
     pendingCopySnapshot = serializedSnapshot()
     saveDebounce.stop()
     saveNow()
-    showStatus("正在整理并复制本轮…", "info")
+    showStatus("COPY // RUN", "info")
     copyProcess.running = true
   }
 
   function finishCopy() {
-    var copiedCount = confirmCount
     var waiting = deferredRecords
     deferredRecords = []
     confirming = false
-    confirmCount = 0
     pendingCopySnapshot = ""
     expandedHistoryIndex = -1
     var nextRound = []
@@ -254,18 +251,13 @@ Item {
     }
     entries = nextRound
     saveNow()
-    showStatus("已复制 " + copiedCount + " 组选区与讨论", "success")
-    Qt.callLater(function() {
-      if (entries.length > 0) focusCurrentEditor()
-      else focusScope.forceActiveFocus()
-    })
+    requestClose()
   }
 
   function failCopy(message) {
     var waiting = deferredRecords
     deferredRecords = []
     confirming = false
-    confirmCount = 0
     pendingCopySnapshot = ""
     if (waiting.length > 0) {
       var merged = entries.slice()
@@ -277,7 +269,7 @@ Item {
       entries = merged
       saveNow()
     }
-    showStatus(message || "复制失败，草稿仍然保留", "error")
+    showStatus(message || "COPY FAIL // DRAFT KEPT", "error")
   }
 
   function focusCurrentEditor() {
@@ -313,7 +305,7 @@ Item {
     running: root.confirming
     onTriggered: {
       if (copyProcess.running) copyProcess.signal(15)
-      root.failCopy("复制超时，当前轮次仍然保留")
+      root.failCopy("COPY TIMEOUT // DRAFT KEPT")
     }
   }
 
@@ -339,14 +331,9 @@ Item {
       onStreamFinished: root.acceptCapture(text)
     }
 
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.consumeError = String(text || "").trim()
-    }
-
     onExited: function(exitCode) {
       if (exitCode !== 0)
-        root.showStatus(root.consumeError || "无法读取这次选区", "error")
+        root.showStatus("CAPTURE FAIL", "error")
       root.runNextCapture()
     }
   }
@@ -362,15 +349,10 @@ Item {
       root.pendingCopySnapshot = ""
     }
 
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.copyError = String(text || "").trim()
-    }
-
     onExited: function(exitCode) {
       if (!root.confirming) return
       if (exitCode === 0) root.finishCopy()
-      else root.failCopy(root.copyError || "复制失败，草稿仍然保留")
+      else root.failCopy("COPY FAIL // DRAFT KEPT")
     }
   }
 
@@ -392,9 +374,9 @@ Item {
     }
     onSaveFailed: function(_error) {
       if (root.confirming)
-        root.showStatus("草稿保存失败；内存快照复制仍会继续", "error")
+        root.showStatus("SAVE FAIL // COPY CONTINUES", "error")
       else
-        root.showStatus("草稿保存失败", "error")
+        root.showStatus("SAVE FAIL", "error")
     }
   }
 
@@ -473,25 +455,27 @@ Item {
               spacing: 0
 
               Text {
-                text: "Discuss"
+                text: "DISCUSS"
                 color: root.foreground
                 font.family: Style.font.family
                 font.pixelSize: Style.font.title
                 font.bold: true
+                font.letterSpacing: Style.spaceReal(1.2)
               }
 
               Text {
                 text: root.entries.length > 0
-                  ? root.entries.length + " 组配对 · 当前编辑第 " + root.entries.length + " 组"
-                  : "选中任意文字，再按 Super + D"
+                  ? root.counter(root.entries.length) + " CAPTURES // EDIT " + root.counter(root.entries.length)
+                  : "SUPER+D // CAPTURE"
                 color: root.muted
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
+                font.letterSpacing: Style.spaceReal(0.7)
               }
             }
 
             Button {
-              text: "隐藏"
+              text: "ESC"
               focusable: true
               foreground: root.foreground
               background: "transparent"
@@ -537,6 +521,7 @@ Item {
             color: root.statusKind === "error" ? Color.urgent : root.foreground
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
+            font.letterSpacing: Style.spaceReal(0.8)
             wrapMode: Text.WordWrap
           }
         }
@@ -570,23 +555,23 @@ Item {
 
                 Text {
                   width: parent.width
-                  text: "还没有选区"
+                  text: "NO CAPTURE"
                   color: root.foreground
                   font.family: Style.font.family
                   font.pixelSize: Style.font.heading
                   font.bold: true
+                  font.letterSpacing: Style.spaceReal(1.4)
                   horizontalAlignment: Text.AlignHCenter
                 }
 
                 Text {
                   width: parent.width
-                  text: "在任何应用里选中文字，按 Super + D。\n每次选区都会和一段独立讨论成对加入当前轮次。"
+                  text: "SELECT TEXT  →  SUPER+D"
                   color: root.muted
                   font.family: Style.font.family
                   font.pixelSize: Style.font.body
-                  wrapMode: Text.WordWrap
+                  font.letterSpacing: Style.spaceReal(0.8)
                   horizontalAlignment: Text.AlignHCenter
-                  lineHeight: 1.25
                 }
               }
             }
@@ -632,26 +617,18 @@ Item {
             spacing: Style.space(2)
 
             Text {
-              text: "下一次 Super + D 会折叠当前配对并新建一组"
+              text: root.entries.length > 0 ? "SUPER+D // NEXT CAPTURE" : "SUPER+D // CAPTURE"
               color: root.foreground
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.WordWrap
-              Layout.fillWidth: true
-            }
-
-            Text {
-              text: "确认后复制全部 Markdown；最后一段讨论可留空"
-              color: root.muted
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
+              font.letterSpacing: Style.spaceReal(0.7)
               wrapMode: Text.WordWrap
               Layout.fillWidth: true
             }
           }
 
           Button {
-            text: root.confirming ? "复制中…" : "确认本轮 · 复制"
+            text: root.confirming ? "COPY // RUN" : "COPY // " + root.counter(root.entries.length)
             focusable: true
             selected: true
             bordered: true

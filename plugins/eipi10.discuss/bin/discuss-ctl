@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+"""Small, auditable boundary between Wayland, Discuss state, and QML."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import uuid
+
+
+SCHEMA_VERSION = 1
+MAX_SELECTION_CHARS = 200_000
+
+
+class DiscussError(RuntimeError):
+    """A user-facing Discuss operation failed."""
+
+
+def state_root() -> Path:
+    base = os.environ.get("XDG_STATE_HOME")
+    return Path(base).expanduser() / "omarchy" / "discuss" if base else Path.home() / ".local" / "state" / "omarchy" / "discuss"
+
+
+def inbox_root() -> Path:
+    return state_root() / "inbox"
+
+
+def ensure_state_dirs() -> None:
+    try:
+        state_root().mkdir(mode=0o700, parents=True, exist_ok=True)
+        inbox_root().mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(state_root(), 0o700)
+        os.chmod(inbox_root(), 0o700)
+    except OSError as error:
+        raise DiscussError("无法创建私有状态目录") from error
+
+
+def write_private_json(path: Path, value: object) -> None:
+    """Atomically replace a JSON file and keep discussion text user-private."""
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temporary_path = Path(temporary_name)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(value, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
+    except OSError as error:
+        raise DiscussError("无法保存选区记录") from error
+
+
+def run_text(command: list[str], *, timeout: float = 3.0) -> str:
+    try:
+        completed = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError as error:
+        raise DiscussError(f"缺少系统命令：{command[0]}") from error
+    except subprocess.TimeoutExpired as error:
+        raise DiscussError(f"{command[0]} 响应超时") from error
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or "").strip()
+        raise DiscussError(detail or f"{command[0]} 执行失败") from error
+    return completed.stdout
+
+
+def active_window() -> dict[str, str]:
+    try:
+        payload = json.loads(run_text(["hyprctl", "activewindow", "-j"]))
+    except (DiscussError, json.JSONDecodeError):
+        return {"class": "", "title": ""}
+    return {
+        "class": str(payload.get("class") or ""),
+        "title": str(payload.get("title") or ""),
+    }
+
+
+def read_primary_selection() -> str:
+    try:
+        completed = subprocess.run(
+            ["wl-paste", "--primary", "--no-newline"],
+            check=False,
+            capture_output=True,
+            timeout=2.0,
+        )
+    except FileNotFoundError as error:
+        raise DiscussError("缺少系统命令：wl-paste") from error
+    except subprocess.TimeoutExpired as error:
+        raise DiscussError("读取选区超时") from error
+
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise DiscussError(detail or "没有读到当前选区")
+
+    return completed.stdout.decode("utf-8", errors="replace")
+
+
+def capture_record(selection: str, source: dict[str, str]) -> dict[str, object]:
+    now = dt.datetime.now(dt.timezone.utc)
+    text = selection
+    truncated = len(text) > MAX_SELECTION_CHARS
+    if truncated:
+        text = text[:MAX_SELECTION_CHARS]
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "id": uuid.uuid4().hex,
+        "text": text,
+        "sourceClass": source.get("class", ""),
+        "sourceTitle": source.get("title", ""),
+        "capturedAt": now.isoformat(timespec="seconds"),
+        "capturedAtMs": int(now.timestamp() * 1000),
+        "truncated": truncated,
+    }
+
+
+def write_inbox_record(record: dict[str, object]) -> Path:
+    ensure_state_dirs()
+    path = inbox_root() / f"{record['id']}.json"
+    write_private_json(path, record)
+    return path
+
+
+def summon(payload: dict[str, object]) -> None:
+    try:
+        subprocess.run(
+            ["omarchy-shell", "shell", "summon", "eipi10.discuss", json.dumps(payload, ensure_ascii=False)],
+            check=True,
+            timeout=5.0,
+        )
+    except FileNotFoundError as error:
+        raise DiscussError("缺少系统命令：omarchy-shell") from error
+    except subprocess.TimeoutExpired as error:
+        raise DiscussError("呼出 Discuss 超时") from error
+    except subprocess.CalledProcessError as error:
+        raise DiscussError("无法呼出 Discuss；请确认插件已经启用") from error
+
+
+def resolved_child(path_text: str, parent: Path) -> Path:
+    try:
+        candidate = Path(path_text).expanduser().resolve(strict=True)
+        resolved_parent = parent.resolve(strict=True)
+    except OSError as error:
+        raise DiscussError("选区记录不存在或不可读") from error
+    if candidate.parent != resolved_parent:
+        raise DiscussError("拒绝读取 Discuss 收件箱之外的文件")
+    return candidate
+
+
+def consume_record(path_text: str) -> dict[str, object]:
+    path = resolved_child(path_text, inbox_root())
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise DiscussError("选区记录损坏或不可读") from error
+    if record.get("schemaVersion") != SCHEMA_VERSION or not isinstance(record.get("text"), str):
+        raise DiscussError("选区记录格式不受支持")
+    path.unlink()
+    return record
+
+
+def load_draft(path_text: str) -> list[dict[str, object]]:
+    try:
+        path = Path(path_text).expanduser().resolve(strict=True)
+        root = state_root().resolve(strict=True)
+    except OSError as error:
+        raise DiscussError("草稿不存在或不可读") from error
+    if path.parent != root:
+        raise DiscussError("拒绝读取 Discuss 状态目录之外的草稿")
+    try:
+        draft = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise DiscussError("草稿损坏或不可读") from error
+    entries = draft.get("entries") if isinstance(draft, dict) else None
+    if not isinstance(entries, list):
+        raise DiscussError("草稿中没有可复制的讨论")
+    return entries
+
+
+def quote_markdown(text: str) -> str:
+    lines = text.splitlines() or [""]
+    return "\n".join("> " + line if line else ">" for line in lines)
+
+
+def source_label(entry: dict[str, object]) -> str:
+    source_class = " ".join(str(entry.get("sourceClass") or "").split())[:120]
+    source_title = " ".join(str(entry.get("sourceTitle") or "").split())[:160]
+    if source_class and source_title:
+        return f"{source_class} · {source_title}"
+    return source_title or source_class or "未知来源"
+
+
+def markdown_inline(text: str) -> str:
+    escaped = text.replace("\\", "\\\\")
+    for marker in ("*", "_", "[", "]"):
+        escaped = escaped.replace(marker, "\\" + marker)
+    return escaped
+
+
+def format_markdown(entries: list[dict[str, object]]) -> str:
+    blocks: list[str] = []
+    for index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            continue
+        selection = str(entry.get("text") or "")
+        discussion = str(entry.get("discussion") or "")
+        heading = markdown_inline(f"引用 {index:02d} · {source_label(entry)}")
+        blocks.append(
+            f"> **{heading}**\n"
+            f">\n"
+            f"{quote_markdown(selection)}\n\n"
+            f"**我的讨论：**\n"
+            f"{discussion}"
+        )
+    if not blocks:
+        raise DiscussError("当前轮次还没有内容")
+    return "\n\n---\n\n".join(blocks).rstrip() + "\n"
+
+
+def copy_to_clipboard(text: str) -> None:
+    try:
+        subprocess.run(
+            ["wl-copy", "--type", "text/plain;charset=utf-8"],
+            input=text.encode("utf-8"),
+            check=True,
+            timeout=5.0,
+        )
+    except FileNotFoundError as error:
+        raise DiscussError("缺少系统命令：wl-copy") from error
+    except subprocess.TimeoutExpired as error:
+        raise DiscussError("写入剪贴板超时") from error
+    except subprocess.CalledProcessError as error:
+        raise DiscussError("写入剪贴板失败") from error
+
+
+def command_capture(_args: argparse.Namespace) -> int:
+    source = active_window()
+    try:
+        selection = read_primary_selection()
+    except DiscussError as error:
+        summon({"error": "no_selection", "message": str(error)})
+        return 2
+    if not selection.strip():
+        summon({"error": "no_selection", "message": "没有读到当前选区"})
+        return 2
+    record = capture_record(selection, source)
+    path = write_inbox_record(record)
+    try:
+        summon({"path": str(path)})
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    return 0
+
+
+def command_consume(args: argparse.Namespace) -> int:
+    json.dump(consume_record(args.path), sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
+def command_format(args: argparse.Namespace) -> int:
+    sys.stdout.write(format_markdown(load_draft(args.path)))
+    return 0
+
+
+def command_copy(args: argparse.Namespace) -> int:
+    entries = load_draft(args.path)
+    copy_to_clipboard(format_markdown(entries))
+    json.dump({"ok": True, "count": len(entries)}, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="discuss-ctl")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    capture_parser = subparsers.add_parser("capture", help="capture the Wayland primary selection")
+    capture_parser.set_defaults(handler=command_capture)
+
+    consume_parser = subparsers.add_parser("consume", help="consume one private inbox record")
+    consume_parser.add_argument("path")
+    consume_parser.set_defaults(handler=command_consume)
+
+    format_parser = subparsers.add_parser("format", help="format a draft as Markdown")
+    format_parser.add_argument("path")
+    format_parser.set_defaults(handler=command_format)
+
+    copy_parser = subparsers.add_parser("copy", help="copy a formatted draft to the clipboard")
+    copy_parser.add_argument("path")
+    copy_parser.set_defaults(handler=command_copy)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        args = build_parser().parse_args(argv)
+        return args.handler(args)
+    except DiscussError as error:
+        print(f"discuss: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

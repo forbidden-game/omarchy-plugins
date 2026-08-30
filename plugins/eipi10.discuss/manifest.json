@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "eipi10.discuss",
+  "name": "Discuss",
+  "version": "1.0.0",
+  "author": "eipi10",
+  "license": "MIT",
+  "description": "Pair selected text with your own discussion, then copy the complete round as structured Markdown.",
+  "kinds": [
+    "panel"
+  ],
+  "keepLoaded": true,
+  "activation": "on-demand",
+  "entryPoints": {
+    "panel": "Discuss.qml"
+  }
+}

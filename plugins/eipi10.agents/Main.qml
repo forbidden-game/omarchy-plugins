@@ -366,6 +366,8 @@ Item {
       todayTotalTokens: tokenMapTotal(todayUsage),
       todayTokensByModel: usageStats.todayTokensByModel || ({}),
       todayModelUsage: todayUsage,
+      todayModelOwners: usageStats.todayModelOwners || ({}),
+      modelOwners: usageStats.modelOwners || ({}),
       recentDays: usageStats.recentDays || [],
       totalPrompts: numberValue(usageStats.totalPrompts),
       totalSessions: numberValue(usageStats.totalSessions),
@@ -391,6 +393,7 @@ Item {
     var modelMap = {}
     var todayModelMap = {}
     var todayModelOwners = ({})
+    var allModelOwners = ({})
     var dateSet = {}
     var todayPrompts = 0, todaySessions = 0
     var totalPrompts = 0, totalSessions = 0
@@ -454,10 +457,21 @@ Item {
       mergeModelMap(todayModelMap, p.todayModelUsage || {})
 
       var todaySrc = p.todayModelUsage || {}
+      var pTodayOwners = p.todayModelOwners || {}
       for (var ownerId in todaySrc) {
         var normalizedOwnerId = Format.normalizeModelId(ownerId)
-        if (!todayModelOwners[normalizedOwnerId]) todayModelOwners[normalizedOwnerId] = p.providerName
-        else if (todayModelOwners[normalizedOwnerId].indexOf(p.providerName) < 0) todayModelOwners[normalizedOwnerId] += " / " + p.providerName
+        var ownerName = pTodayOwners[ownerId] || pTodayOwners[normalizedOwnerId] || p.providerName
+        if (!todayModelOwners[normalizedOwnerId]) todayModelOwners[normalizedOwnerId] = ownerName
+        else if (todayModelOwners[normalizedOwnerId].indexOf(ownerName) < 0) todayModelOwners[normalizedOwnerId] += " / " + ownerName
+      }
+
+      var allSrc = p.modelUsage || {}
+      var pAllOwners = p.modelOwners || {}
+      for (var allOwnerId in allSrc) {
+        var normalizedAllId = Format.normalizeModelId(allOwnerId)
+        var allOwnerName = pAllOwners[allOwnerId] || pAllOwners[normalizedAllId] || pTodayOwners[allOwnerId] || p.providerName
+        if (!allModelOwners[normalizedAllId]) allModelOwners[normalizedAllId] = allOwnerName
+        else if (allModelOwners[normalizedAllId].indexOf(allOwnerName) < 0) allModelOwners[normalizedAllId] += " / " + allOwnerName
       }
 
       var activeDates = Array.isArray(p.activeDates) ? p.activeDates : []
@@ -515,6 +529,7 @@ Item {
       activeDays: activeDates.length,
       activeDates: activeDates,
       modelUsage: modelMap,
+      modelOwners: allModelOwners,
       agentCount: pList.length,
       hasLocalStats: hasStats,
       hasPromptStats: true,

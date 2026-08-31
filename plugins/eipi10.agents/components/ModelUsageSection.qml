@@ -23,11 +23,13 @@ Column {
   readonly property var tableData: {
     var p = root.provider
     var today = p ? (p.todayModelUsage || {}) : {}
-    var owners = (p && p.todayModelOwners) || {}
     var anyToday = false
     for (var id in today) {
       if (bucketTotal(today[id]) > 0) { anyToday = true; break }
     }
+    var owners = anyToday
+      ? ((p && p.todayModelOwners) || {})
+      : ((p && (p.modelOwners || p.todayModelOwners)) || {})
     var source = anyToday ? today : (p ? (p.modelUsage || {}) : {})
     var rows = []
     var totalCostSum = 0
@@ -54,10 +56,13 @@ Column {
       normalizedBuckets[normId].cacheReadInputTokens += Number(bucket.cacheReadInputTokens || bucket.cacheRead || 0)
       normalizedBuckets[normId].cacheCreationInputTokens += Number(bucket.cacheCreationInputTokens || bucket.cacheWrite || 0)
       normalizedBuckets[normId].unclassifiedTokens += Number(bucket.unclassifiedTokens || 0)
-      if (owners[rawId] && normalizedOwners[normId] !== undefined) {
-        if (normalizedOwners[normId].indexOf(owners[rawId]) < 0) normalizedOwners[normId] += " / " + owners[rawId]
-      } else if (owners[rawId]) {
-        normalizedOwners[normId] = owners[rawId]
+      var currentOwner = owners[rawId] || owners[normId] || ""
+      if (currentOwner !== "") {
+        if (normalizedOwners[normId] !== undefined && normalizedOwners[normId] !== "") {
+          if (normalizedOwners[normId].indexOf(currentOwner) < 0) normalizedOwners[normId] += " / " + currentOwner
+        } else {
+          normalizedOwners[normId] = currentOwner
+        }
       }
     }
 

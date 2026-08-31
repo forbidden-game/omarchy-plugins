@@ -71,6 +71,8 @@ def number(value):
 def model_name(raw):
   value = str(raw or "codex").strip()
   clean = value.lower().replace("//", "/")
+  if "gemini-3.7-flash-control" in clean:
+    return "gemini-3.7-flash-control"
   if "gemini-3.7-flash" in clean or "gemini-3-7-flash" in clean:
     return "gemini-3.7-flash"
   if "glm-5.3" in clean and "flash" in clean:
@@ -508,24 +510,36 @@ def parse_proto(buf):
 
 def scan_agy_sessions():
   # Antigravity (agy) records per-generation model and token usage in
-  # ~/.gemini/antigravity-cli/conversations/*.db.
-  conv_dir = Path.home() / ".gemini" / "antigravity-cli" / "conversations"
-  if not conv_dir.is_dir():
-    return True
+  # ~/.gemini/antigravity/conversations/*.db and legacy ~/.gemini/antigravity-cli/conversations/*.db.
+  conv_dirs = [
+    Path.home() / ".gemini" / "antigravity" / "conversations",
+    Path.home() / ".gemini" / "antigravity-cli" / "conversations",
+    Path.home() / ".gemini" / "antigravity-ide" / "conversations",
+  ]
   cutoff = time.time() - 30 * 24 * 60 * 60
   db_files = []
-  try:
-    for path in conv_dir.glob("*.db"):
-      try:
-        if path.stat().st_mtime >= cutoff:
-          db_files.append(path)
-      except OSError:
-        pass
-  except OSError:
-    return False
+  for conv_dir in conv_dirs:
+    if not conv_dir.is_dir():
+      continue
+    try:
+      for path in conv_dir.glob("*.db"):
+        try:
+          if path.stat().st_mtime >= cutoff:
+            db_files.append(path)
+        except OSError:
+          pass
+    except OSError:
+      pass
+
+  if not db_files:
+    return True
 
   all_complete = True
+  seen_db_stems = set()
   for db_path in db_files:
+    if db_path.stem in seen_db_stems:
+      continue
+    seen_db_stems.add(db_path.stem)
     try:
       conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
     except sqlite3.Error:
@@ -607,15 +621,23 @@ def cache_root():
 def scan_cache_paths():
   codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
   db = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")) / "opencode" / "opencode.db"
-  agy_dir = Path.home() / ".gemini" / "antigravity-cli" / "conversations"
+  agy_dirs = [
+    Path.home() / ".gemini" / "antigravity" / "conversations",
+    Path.home() / ".gemini" / "antigravity-cli" / "conversations",
+    Path.home() / ".gemini" / "antigravity-ide" / "conversations",
+  ]
   zcode_dir = Path.home() / ".zcode" / "cli" / "rollout"
   # The digest covers every data path the scan reads: the codex session
   # roots, the opencode DB, the agy conversation DBs, and (via Path.home())
   # the pi/omp session roots.
-  digest = hashlib.sha1(
-    (str(Path.home()) + "\n" + str(codex_home) + "\n" + str(db) + "\n"
-     + str(agy_dir) + "\n" + str(zcode_dir)).encode("utf-8")
-  ).hexdigest()[:16]
+  digest_parts = [
+    str(Path.home()),
+    str(codex_home),
+    str(db),
+    *(str(d) for d in agy_dirs),
+    str(zcode_dir),
+  ]
+  digest = hashlib.sha1("\n".join(digest_parts).encode("utf-8")).hexdigest()[:16]
   root = cache_root()
   return root / f"codex-scan-{digest}.json", root / f"codex-scan-{digest}.lock"
 

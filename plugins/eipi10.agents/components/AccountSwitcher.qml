@@ -8,6 +8,10 @@ Column {
   property var accounts: []
   property string currentAccountId: ""
   property bool switching: false
+  property bool currentAppStatusKnown: false
+  property bool currentAppReady: false
+  property string statusMessage: ""
+  property bool statusError: false
   property double nowMs: Date.now()
   property color foreground: Color.foreground
   property color urgent: Color.urgent
@@ -262,7 +266,7 @@ Column {
             }
           }
 
-          // Action: LIVE tag or Switch button
+          // Action: native App auth state or Switch button
           Item {
             id: actionPart
             width: accountRow.isCurrent ? liveTag.width : switchChip.width
@@ -275,15 +279,24 @@ Column {
               width: liveLabel.implicitWidth + Style.space(12)
               height: liveLabel.implicitHeight + Style.space(4)
               radius: Style.cornerRadius
-              color: root.alpha(root.accent, 0.15)
+              color: root.alpha(
+                root.currentAppReady ? root.accent : (
+                  root.currentAppStatusKnown ? root.urgent : root.foreground
+                ),
+                0.15
+              )
               anchors.verticalCenter: parent.verticalCenter
               anchors.right: parent.right
 
               Text {
                 id: liveLabel
                 anchors.centerIn: parent
-                text: "LIVE"
-                color: root.accent
+                text: root.currentAppReady
+                  ? "LIVE"
+                  : (root.currentAppStatusKnown ? "VERIFY" : "CHECK")
+                color: root.currentAppReady
+                  ? root.accent
+                  : (root.currentAppStatusKnown ? root.urgent : root.dim)
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
@@ -305,7 +318,7 @@ Column {
               Text {
                 id: switchLabel
                 anchors.centerIn: parent
-                text: "Switch"
+                text: root.switching ? "Switching…" : "Switch"
                 color: switchHover.containsMouse ? root.foreground : root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -316,7 +329,8 @@ Column {
                 id: switchHover
                 anchors.fill: parent
                 hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
+                enabled: !root.switching
+                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                 onClicked: {
                   if (accountRow.modelData && accountRow.modelData.id) {
                     root.switchRequested(accountRow.modelData.id)
@@ -345,5 +359,15 @@ Column {
         }
       }
     }
+  }
+
+  Text {
+    visible: root.statusMessage !== ""
+    width: parent.width
+    text: root.statusMessage
+    color: root.statusError ? root.urgent : root.dim
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+    wrapMode: Text.Wrap
   }
 }

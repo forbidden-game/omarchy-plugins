@@ -71,39 +71,23 @@ multiplying the same local tokens and price.
 |---|---|---|
 | `claude` | Anthropic's OAuth usage endpoint (5-hour session + 7-day weekly) | `~/.claude/projects` transcripts, opencode sessions on an Anthropic provider, plus `stats-cache.json` and `history.jsonl` as fallback |
 | `codex` | The Codex app-server RPC | unified machine usage from native Codex, ZCode, pi/omp, opencode, and Antigravity (agy) sessions |
-| `antigravity` | Google Cloud Code API (5-hour session + 7-day weekly per model group) & standalone multi-account switching with OAuth | — (subscription state only; usage is already in the unified machine dataset) |
+| `antigravity` | Google Cloud Code API (5-hour session + 7-day weekly per model group) and native App multi-account switching with OAuth | — (subscription state only; usage is already in the unified machine dataset) |
 | `fireworks` | Estimated prepaid balance: configured funding minus rated account costs | Fireworks billing API, grouped by day and model for the last 30 days |
 
-### Antigravity streaming proxy
+### Native Antigravity account switching
 
-The Antigravity tab can run a loopback-only OpenAI Responses proxy for `pi`
-and `omp`. The helper installs an enabled user-level systemd service,
-generates a random local API key, and adds the `antigravity-proxy` provider to
-both clients without changing their default models.
+The account files in `~/.config/omarchy/agents/antigravity/auth/` are the
+switcher's private credential vault. Antigravity itself persists only one
+active credential in the desktop keyring; its frontend keeps the current auth
+machine in memory rather than local storage.
 
-Credentials have one source of truth:
-`~/.config/omarchy/agents/antigravity/auth/`. CLIProxyAPI and the Agent Panel
-auth controller are the only runtime writers for access-token refreshes;
-consumers such as Omarvoice never read or rewrite the credential directly.
-Account files under `accounts/` contain display and quota metadata only, so
-restarting a consumer cannot replace a new token with an older copy. A
-five-minute systemd watchdog restarts the proxy once for a new authentication
-failure and notifies the desktop if the same failure persists.
-
-The configured models use the clients' `openai-responses` implementation, so
-reasoning summaries, interactive responses, and tool calls use typed streaming
-events over SSE:
-
-```bash
-pi --model antigravity-proxy/gemini-3.7-flash-high
-omp --model antigravity-proxy/gemini-3.7-flash-high
-```
-
-The panel starts and stops `omarchy-antigravity-proxy.service` and can copy
-either launch command. The service starts with the user session; stopping it
-from the panel keeps it stopped until the next manual start or login. Runtime
-configuration stays under `~/.config/omarchy/agents/antigravity/proxy/`; no
-secret is stored in this repository.
+A switch is therefore one transaction: stop the native App, preserve any token
+rotation from the old session, write the selected credential to the keyring,
+restart the App, then run the same `HasAuthToken` → `GetAuthStatus` →
+`GetUserStatus` RPC chain used by its frontend. The account index is committed
+only when the App returns `hasValidAuth`; an ineligible or mismatched account
+restores the previous keyring credential and App session. The panel's `LIVE`
+badge is based on that native decision, not merely on a cached email address.
 
 ### Omarvoice authentication
 
@@ -111,7 +95,8 @@ Omarvoice reuses the active Antigravity account and long-lived OAuth flow from
 this plugin. `voice-auth-status` exposes readiness metadata only;
 `voice-auth-sync` refreshes the canonical credential only when its access
 token is near expiry, then writes Antigravity's native token shape directly to
-the desktop keyring. No token is printed or passed through QML.
+the desktop keyring. No token is printed or passed through QML. This is
+independent of the App switch transaction and is not a general agent proxy.
 
 On a new machine, `oauth-client-bootstrap` extracts the supported OAuth client
 shipped in Antigravity's `language_server`. It chooses the client ID and secret
@@ -167,6 +152,9 @@ only adds the meter and the spent-of-funded line under the real figure.
 - Bar icon: left = panel, right = launch agent, middle = next subscription.
 - Panel: `h`/`l` switch subscription, `j`/`k` scroll, `r` or Enter refresh,
   Tab moves to the neighboring bar panel, Esc closes.
+- Antigravity account switch: stops the app, preserves any runtime OAuth token
+  rotation, validates the selected account, synchronizes the desktop keyring
+  and `~/.gemini` credential files, then starts the app with the new session.
 - IPC: `omarchy-shell omarchy.agents <open|close|toggle|refresh|next>`.
 
 ## Settings

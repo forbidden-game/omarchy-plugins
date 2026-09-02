@@ -47,19 +47,49 @@ Panel {
   property string oauthStatus: "idle" // "idle", "listening", "success", "error"
   property string oauthMessage: ""
   property bool accountSwitching: false
-  property var proxyState: ({})
-  property bool proxyBusy: false
-  property string proxyMessage: ""
+  property string accountSwitchMessage: ""
+  property bool accountSwitchError: false
+  property var appAuthState: ({})
+  property bool appAuthChecking: false
 
   Process {
     id: switchProc
     running: false
+    stdout: StdioCollector { waitForEnd: true }
     onExited: function(exitCode) {
       root.accountSwitching = false
-      if (exitCode === 0) {
-        usage.refreshAll(true)
+      var result = null
+      try {
+        result = JSON.parse(switchProc.stdout.text.trim())
+      } catch (e) {
+        result = null
       }
+      if (exitCode === 0 && result && result.success === true) {
+        root.accountSwitchError = false
+        root.accountSwitchMessage = "账号已切换，Antigravity 已确认登录"
+        root.appAuthState = {
+          "ready": true,
+          "status": "ready",
+          "email": String(result.email || ""),
+          "message": "Antigravity 已确认登录"
+        }
+        usage.refreshAll(true)
+      } else {
+        root.accountSwitchError = true
+        root.accountSwitchMessage = result
+          ? String(result.error || "账号切换失败")
+          : "账号切换失败"
+        Qt.callLater(function() { root.refreshAppAuthStatus() })
+      }
+      switchMessageTimer.restart()
     }
+  }
+
+  Timer {
+    id: switchMessageTimer
+    interval: 5000
+    repeat: false
+    onTriggered: root.accountSwitchMessage = ""
   }
 
   Process {
@@ -104,32 +134,24 @@ Panel {
   }
 
   Process {
-    id: proxyStatusProc
+    id: appAuthProc
     running: false
-    command: [root.home + "/.config/omarchy/plugins/eipi10.agents/bin/omarchy-antigravity-ctl", "proxy-status"]
+    command: [root.home + "/.config/omarchy/plugins/eipi10.agents/bin/omarchy-antigravity-ctl", "app-auth-status"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.parseProxyStatus(text)
+      onStreamFinished: {
+        var state = root.lastJsonLine(text)
+        if (state) root.appAuthState = state
+      }
     }
-  }
-
-  Process {
-    id: proxyControlProc
-    running: false
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.parseProxyControl(text)
-    }
-    onExited: function(exitCode) {
-      root.proxyBusy = false
-      if (exitCode !== 0 && root.proxyMessage === "") root.proxyMessage = "代理操作失败"
-      root.refreshProxyStatus()
-    }
+    onExited: root.appAuthChecking = false
   }
 
   function switchAccount(accId) {
     if (accountSwitching || !accId) return
     accountSwitching = true
+    accountSwitchMessage = ""
+    accountSwitchError = false
     switchProc.command = [root.home + "/.config/omarchy/plugins/eipi10.agents/bin/omarchy-antigravity-ctl", "switch", accId]
     switchProc.running = true
   }
@@ -192,43 +214,10 @@ Panel {
     return null
   }
 
-  function parseProxyStatus(txt) {
-    var state = lastJsonLine(txt)
-    if (state) proxyState = state
-  }
-
-  function parseProxyControl(txt) {
-    var result = lastJsonLine(txt)
-    if (!result) return
-    if (result.status === "error") {
-      proxyMessage = "操作失败：" + String(result.error || "未知错误")
-    } else if (result.status === "copied") {
-      proxyMessage = String(result.client || "").toUpperCase() + " 启动命令已复制"
-    } else if (result.status === "running") {
-      proxyMessage = "流式代理已启动"
-    } else if (result.status === "stopped") {
-      proxyMessage = "流式代理已停止"
-    }
-  }
-
-  function refreshProxyStatus() {
-    if (!proxyStatusProc.running) proxyStatusProc.running = true
-  }
-
-  function runProxyAction(action) {
-    if (proxyBusy || proxyControlProc.running) return
-    proxyBusy = true
-    proxyMessage = ""
-    var command = action === "start"
-      ? "proxy-start"
-      : (action === "stop" ? "proxy-stop" : "proxy-copy")
-    proxyControlProc.command = [
-      root.home + "/.config/omarchy/plugins/eipi10.agents/bin/omarchy-antigravity-ctl",
-      command
-    ]
-    if (action === "copy-pi") proxyControlProc.command.push("pi")
-    else if (action === "copy-omp") proxyControlProc.command.push("omp")
-    proxyControlProc.running = true
+  function refreshAppAuthStatus() {
+    if (appAuthProc.running) return
+    appAuthChecking = true
+    appAuthProc.running = true
   }
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
@@ -321,14 +310,14 @@ Panel {
 
   onProviderIndexChanged: {
     if (panelFlick) panelFlick.contentY = 0
-    if (provider && provider.providerId === "antigravity") refreshProxyStatus()
+    if (provider && provider.providerId === "antigravity") refreshAppAuthStatus()
   }
   onOpenedChanged: if (opened) {
     cursorActive = false
     nowMs = Date.now()
     if (panelFlick) panelFlick.contentY = 0
     usage.refreshAll(false)
-    if (provider && provider.providerId === "antigravity") refreshProxyStatus()
+    if (provider && provider.providerId === "antigravity") refreshAppAuthStatus()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -345,10 +334,10 @@ Panel {
   }
 
   Timer {
-    interval: 5000
+    interval: 30000
     running: root.opened && !!root.provider && root.provider.providerId === "antigravity"
     repeat: true
-    onTriggered: root.refreshProxyStatus()
+    onTriggered: root.refreshAppAuthStatus()
   }
 
   IpcHandler {
@@ -469,6 +458,16 @@ Panel {
             accounts: root.provider ? (root.provider.accounts || []) : []
             currentAccountId: root.provider ? (root.provider.currentAccountId || "") : ""
             switching: root.accountSwitching
+            currentAppStatusKnown: String(root.appAuthState.status || "") !== ""
+            currentAppReady: root.appAuthState.ready === true
+            statusMessage: root.accountSwitchMessage !== ""
+              ? root.accountSwitchMessage
+              : String(root.appAuthState.message || "")
+            statusError: root.accountSwitchMessage !== ""
+              ? root.accountSwitchError
+              : (String(root.appAuthState.status || "") !== ""
+                 && root.appAuthState.ready !== true
+                 && root.appAuthState.status !== "app_stopped")
             nowMs: root.nowMs
             foreground: root.foreground
             urgent: root.urgent
@@ -491,25 +490,6 @@ Panel {
             fontFamily: root.fontFamily
             onCopyLinkRequested: function() { root.copyOAuthLink() }
             onCancelRequested: function() { root.cancelOAuth() }
-          }
-
-          // ---------- Local streaming proxy for pi / omp ----------
-          PanelSeparator {
-            visible: proxySec.visible
-            foreground: root.foreground
-          }
-
-          Comp.ProxySection {
-            id: proxySec
-            visible: !!root.provider && root.provider.providerId === "antigravity"
-            stateData: root.proxyState
-            busy: root.proxyBusy
-            message: root.proxyMessage
-            foreground: root.foreground
-            urgent: root.urgent
-            dim: root.dim
-            fontFamily: root.fontFamily
-            onActionRequested: function(action) { root.runProxyAction(action) }
           }
 
           // ---------- Status Banner ----------

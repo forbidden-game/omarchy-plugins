@@ -91,12 +91,14 @@ badge is based on that native decision, not merely on a cached email address.
 
 ### Omarvoice authentication
 
-Omarvoice reuses the active Antigravity account and long-lived OAuth flow from
-this plugin. `voice-auth-status` exposes readiness metadata only;
-`voice-auth-sync` refreshes the canonical credential only when its access
-token is near expiry, then writes Antigravity's native token shape directly to
-the desktop keyring. No token is printed or passed through QML. This is
-independent of the App switch transaction and is not a general agent proxy.
+Omarvoice pins one registered account in the shared account index instead of
+following the native App's active account. `voice-bind <id>` changes only that
+pin. `voice-auth-status` exposes readiness metadata only; `voice-auth-sync`
+refreshes the pinned canonical credential near expiry and writes
+Antigravity's native token shape to Omarvoice's private file-token home.
+Omarvoice's language server cannot access the desktop Secret Service, so it
+cannot overwrite the App's keyring credential. No token is printed or passed
+through QML.
 
 On a new machine, `oauth-client-bootstrap` extracts the supported OAuth client
 shipped in Antigravity's `language_server`. It chooses the client ID and secret

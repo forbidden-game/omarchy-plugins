@@ -71,6 +71,38 @@ class GrpcWebFrameTests(unittest.TestCase):
         connection.close.assert_called_once()
 
 
+class LanguageServerIsolationTests(unittest.TestCase):
+    def test_language_server_uses_private_home_without_desktop_keyring(self):
+        process = mock.Mock()
+        process.stderr = [
+            "listening on random port at 12345 for HTTPS\n",
+        ]
+        process.poll.return_value = None
+        process.wait.return_value = 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            auth_home = Path(directory) / "auth-home"
+            with mock.patch.object(
+                bridge, "OMARVOICE_AUTH_HOME", auth_home
+            ):
+                with mock.patch.object(
+                    bridge.subprocess, "Popen", return_value=process
+                ) as popen:
+                    with bridge.LanguageServer() as server:
+                        self.assertEqual(server.https_port, 12345)
+
+        runtime_env = popen.call_args.kwargs["env"]
+        self.assertEqual(runtime_env["HOME"], str(auth_home))
+        self.assertEqual(
+            runtime_env["DBUS_SESSION_BUS_ADDRESS"],
+            "unix:path=/dev/null",
+        )
+        self.assertEqual(
+            runtime_env["XDG_CONFIG_HOME"],
+            str(auth_home / ".config"),
+        )
+
+
 class TranscriptTests(unittest.TestCase):
     def test_final_transcript_is_extracted(self):
         result = bridge.transcription_text({

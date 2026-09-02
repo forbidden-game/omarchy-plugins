@@ -44,6 +44,12 @@ START_PATH = f"{SERVICE_PREFIX}/StreamAudioTranscription"
 CHUNK_PATH = f"{SERVICE_PREFIX}/SendAudioChunk"
 END_PATH = f"{SERVICE_PREFIX}/EndAudioSession"
 DEFAULT_LANGUAGE_SERVER = Path("/opt/Antigravity/resources/bin/language_server")
+OMARVOICE_AUTH_HOME = Path(
+    os.environ.get(
+        "OMARVOICE_AUTH_HOME",
+        str(Path.home() / ".local/share/omarvoice-antigravity/home"),
+    )
+)
 DEFAULT_TIMEOUT_SECONDS = 120
 PCM_CHUNK_BYTES = 32_000  # One second of signed 16-bit, 16 kHz mono PCM.
 LIVE_PCM_CHUNK_BYTES = 6_400  # 200 ms of signed 16-bit, 16 kHz mono PCM.
@@ -238,6 +244,16 @@ class LanguageServer:
             "--cloud_code_endpoint",
             "https://daily-cloudcode-pa.googleapis.com",
         ]
+        runtime_env = os.environ.copy()
+        runtime_env.update({
+            "HOME": str(OMARVOICE_AUTH_HOME),
+            "XDG_CONFIG_HOME": str(OMARVOICE_AUTH_HOME / ".config"),
+            "XDG_DATA_HOME": str(OMARVOICE_AUTH_HOME / ".local/share"),
+            "XDG_CACHE_HOME": str(OMARVOICE_AUTH_HOME / ".cache"),
+            # Force Antigravity standalone onto its private file token. The
+            # native App remains the sole client of the desktop keyring item.
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/dev/null",
+        })
         self.process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
@@ -245,6 +261,7 @@ class LanguageServer:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=runtime_env,
         )
         assert self.process.stderr is not None
         self._drainer = threading.Thread(
@@ -1362,24 +1379,7 @@ def status() -> dict[str, Any]:
         "ready": True,
         "provider": "antigravity-cloud",
         "email": result.get("email") or "",
-        "message": result.get("message") or "Agent Panel 长期鉴权已就绪",
-    }
-
-
-def authorize() -> dict[str, Any]:
-    """Start Agent Panel's loopback OAuth flow without blocking the QML process."""
-    controller = find_agent_controller()
-    subprocess.Popen(
-        [str(controller), "oauth-start"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    return {
-        "status": "authorization_started",
-        "ready": False,
-        "message": "授权链接已复制；完成登录后请刷新状态",
+        "message": result.get("message") or "Omarvoice 固定账号已就绪",
     }
 
 
@@ -1389,7 +1389,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("status", help="check engine and Agent Panel auth")
-    subparsers.add_parser("authorize", help="start Agent Panel OAuth")
     subparsers.add_parser(
         "warmup", help="start and authenticate the resident service"
     )
@@ -1425,8 +1424,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "status":
             result = status()
-        elif args.command == "authorize":
-            result = authorize()
         elif args.command == "warmup":
             result = daemon_request("warmup")
         elif args.command == "record-start":

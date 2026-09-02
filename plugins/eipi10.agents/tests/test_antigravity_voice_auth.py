@@ -124,7 +124,7 @@ class VoiceAuthTests(unittest.TestCase):
         with mock.patch.object(controller, "ensure_storage_migrated"):
             with mock.patch.object(
                 controller,
-                "current_account",
+                "voice_account",
                 return_value={"id": "account-1", "email": "voice@example.com"},
             ):
                 with mock.patch.object(
@@ -143,47 +143,82 @@ class VoiceAuthTests(unittest.TestCase):
         self.assertTrue(result["ready"])
         self.assertNotIn("private-refresh", output.getvalue())
 
-    def test_sync_sends_secret_only_over_keyring_stdin(self):
+    def test_voice_account_is_pinned_independently_from_app_account(self):
+        with tempfile.TemporaryDirectory() as directory:
+            index_path = Path(directory) / "accounts.json"
+            index_path.write_text(json.dumps({
+                "current_account_id": "app-account",
+                "voice_account_id": "voice-account",
+                "accounts": [
+                    {"id": "app-account", "email": "app@example.com"},
+                    {"id": "voice-account", "email": "voice@example.com"},
+                ],
+            }), encoding="utf-8")
+            with mock.patch.object(controller, "ACCOUNTS_INDEX", index_path):
+                account = controller.voice_account()
+
+        self.assertEqual(account["id"], "voice-account")
+        self.assertEqual(account["email"], "voice@example.com")
+
+    def test_sync_writes_secret_only_to_private_file(self):
         output = StringIO()
-        stored = mock.Mock(returncode=0)
         credential = {
             "access_token": "private-access",
             "refresh_token": "private-refresh",
-            "expired": "2026-08-27T22:00:00+00:00",
+            "expired": "2999-01-01T00:00:00+00:00",
             "token_type": "Bearer",
+            "scope": controller.AICODE_SCOPE,
         }
-        with mock.patch.object(controller, "ensure_storage_migrated"):
-            with mock.patch.object(
-                controller,
-                "current_account",
-                return_value={"id": "account-1", "email": "voice@example.com"},
-            ):
+        with tempfile.TemporaryDirectory() as directory:
+            auth_home = Path(directory) / "home"
+            token_file = (
+                auth_home / ".gemini" / "jetski-standalone-oauth-token"
+            )
+            with mock.patch.object(controller, "ensure_storage_migrated"):
                 with mock.patch.object(
                     controller,
-                    "refresh_credential",
-                    return_value=(credential, {controller.AICODE_SCOPE}),
+                    "voice_account",
+                    return_value={
+                        "id": "account-1",
+                        "email": "voice@example.com",
+                    },
                 ):
                     with mock.patch.object(
-                        controller.shutil, "which", return_value="/usr/bin/secret-tool"
+                        controller,
+                        "absorb_omarvoice_runtime_credential",
+                        return_value=False,
                     ):
                         with mock.patch.object(
-                            controller.subprocess, "run", return_value=stored
-                        ) as run:
-                            with redirect_stdout(output):
-                                exit_code = controller.voice_auth_sync()
+                            controller,
+                            "load_credential",
+                            return_value=credential,
+                        ):
+                            with mock.patch.object(
+                                controller,
+                                "OMARVOICE_AUTH_HOME",
+                                auth_home,
+                            ):
+                                with mock.patch.object(
+                                    controller,
+                                    "OMARVOICE_TOKEN_FILE",
+                                    token_file,
+                                ):
+                                    with redirect_stdout(output):
+                                        exit_code = controller.voice_auth_sync()
 
-        self.assertEqual(exit_code, 0)
-        self.assertNotIn("private-access", output.getvalue())
-        self.assertNotIn("private-refresh", output.getvalue())
-        keyring_input = run.call_args.kwargs["input"]
-        self.assertIn("private-access", keyring_input)
-        self.assertIn("private-refresh", keyring_input)
-        self.assertIs(controller.subprocess.DEVNULL, run.call_args.kwargs["stdout"])
-        self.assertIs(controller.subprocess.DEVNULL, run.call_args.kwargs["stderr"])
+            self.assertEqual(exit_code, 0)
+            self.assertNotIn("private-access", output.getvalue())
+            self.assertNotIn("private-refresh", output.getvalue())
+            stored = json.loads(token_file.read_text(encoding="utf-8"))
+            self.assertEqual(stored["token"]["access_token"], "private-access")
+            self.assertEqual(
+                stored["token"]["refresh_token"],
+                "private-refresh",
+            )
+            self.assertEqual(os.stat(token_file).st_mode & 0o777, 0o600)
 
     def test_sync_reuses_access_token_with_safe_remaining_lifetime(self):
         output = StringIO()
-        stored = mock.Mock(returncode=0)
         credential = {
             "access_token": "still-valid-access",
             "refresh_token": "private-refresh",
@@ -194,22 +229,22 @@ class VoiceAuthTests(unittest.TestCase):
         with mock.patch.object(controller, "ensure_storage_migrated"):
             with mock.patch.object(
                 controller,
-                "current_account",
+                "voice_account",
                 return_value={"id": "account-1", "email": "voice@example.com"},
             ):
                 with mock.patch.object(
-                    controller, "load_credential", return_value=credential
+                    controller,
+                    "absorb_omarvoice_runtime_credential",
+                    return_value=False,
                 ):
                     with mock.patch.object(
-                        controller, "refresh_credential"
-                    ) as refresh:
+                        controller, "load_credential", return_value=credential
+                    ):
                         with mock.patch.object(
-                            controller.shutil,
-                            "which",
-                            return_value="/usr/bin/secret-tool",
-                        ):
+                            controller, "refresh_credential"
+                        ) as refresh:
                             with mock.patch.object(
-                                controller.subprocess, "run", return_value=stored
+                                controller, "write_omarvoice_credential"
                             ):
                                 with redirect_stdout(output):
                                     exit_code = controller.voice_auth_sync()
@@ -219,7 +254,7 @@ class VoiceAuthTests(unittest.TestCase):
         self.assertFalse(result["refreshed"])
         refresh.assert_not_called()
 
-    def test_sync_reports_an_unresponsive_keyring_without_committing_secrets(self):
+    def test_sync_reports_private_store_failure_without_printing_secrets(self):
         output = StringIO()
         credential = {
             "access_token": "private-access",
@@ -231,35 +266,69 @@ class VoiceAuthTests(unittest.TestCase):
         with mock.patch.object(controller, "ensure_storage_migrated"):
             with mock.patch.object(
                 controller,
-                "current_account",
+                "voice_account",
                 return_value={"id": "account-1", "email": "voice@example.com"},
             ):
                 with mock.patch.object(
                     controller,
-                    "load_credential",
-                    return_value=credential,
+                    "absorb_omarvoice_runtime_credential",
+                    return_value=False,
                 ):
                     with mock.patch.object(
-                        controller.shutil,
-                        "which",
-                        return_value="/usr/bin/secret-tool",
+                        controller,
+                        "load_credential",
+                        return_value=credential,
                     ):
                         with mock.patch.object(
-                            controller.subprocess,
-                            "run",
-                            side_effect=controller.subprocess.TimeoutExpired(
-                                "secret-tool",
-                                10,
-                            ),
+                            controller,
+                            "write_omarvoice_credential",
+                            side_effect=OSError("read-only"),
                         ):
                             with redirect_stdout(output):
                                 exit_code = controller.voice_auth_sync()
 
         result = json.loads(output.getvalue())
         self.assertEqual(exit_code, 1)
-        self.assertEqual(result["status"], "keyring_write_failed")
+        self.assertEqual(result["status"], "credential_write_failed")
         self.assertNotIn("private-access", output.getvalue())
         self.assertNotIn("private-refresh", output.getvalue())
+
+    def test_bind_pins_voice_account_without_switching_app(self):
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            index_path = Path(directory) / "accounts.json"
+            index_path.write_text(json.dumps({
+                "version": "2.0",
+                "current_account_id": "app-account",
+                "accounts": [
+                    {"id": "app-account", "email": "app@example.com"},
+                    {"id": "voice-account", "email": "voice@example.com"},
+                ],
+            }), encoding="utf-8")
+            with mock.patch.object(controller, "ACCOUNTS_INDEX", index_path):
+                with mock.patch.object(
+                    controller, "ensure_storage_migrated"
+                ):
+                    with mock.patch.object(
+                        controller,
+                        "sync_voice_account",
+                        return_value=({
+                            "status": "ready",
+                            "ready": True,
+                            "email": "voice@example.com",
+                        }, 0),
+                    ):
+                        with redirect_stdout(output):
+                            exit_code = controller.bind_voice_account(
+                                "voice-account"
+                            )
+
+            stored = json.loads(index_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stored["voice_account_id"], "voice-account")
+        self.assertEqual(stored["current_account_id"], "app-account")
+        self.assertTrue(json.loads(output.getvalue())["pinned"])
 
     def test_token_near_expiry_requires_refresh(self):
         credential = {

@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 # omarchy:summary=Native Antigravity App account switching, OAuth, and quotas
-# omarchy:args=[switch <id>] [app-auth-status] [oauth-client-bootstrap] [oauth-start] [oauth-cancel] [refresh [id]] [voice-auth-*]
+# omarchy:args=[switch <id>] [app-auth-status] [oauth-client-bootstrap] [oauth-start] [oauth-cancel] [refresh [id]] [voice-bind <id>] [voice-auth-*]
 # omarchy:hidden=true
 """Antigravity control helper for Omarchy Agents plugin.
 
@@ -40,6 +40,15 @@ ACCOUNTS_DIR = ANTIGRAVITY_DIR / "accounts"
 AUTH_DIR = ANTIGRAVITY_DIR / "auth"
 BACKUPS_DIR = ANTIGRAVITY_DIR / "backups"
 OAUTH_CONFIG_FILE = ANTIGRAVITY_DIR / "oauth.json"
+OMARVOICE_AUTH_HOME = Path(
+    os.environ.get(
+        "OMARVOICE_AUTH_HOME",
+        str(HOME / ".local" / "share" / "omarvoice-antigravity" / "home"),
+    )
+)
+OMARVOICE_TOKEN_FILE = (
+    OMARVOICE_AUTH_HOME / ".gemini" / "jetski-standalone-oauth-token"
+)
 ANTIGRAVITY_LANGUAGE_SERVER = Path(
     os.environ.get(
         "OMARVOICE_ANTIGRAVITY_LANGUAGE_SERVER",
@@ -865,6 +874,21 @@ def current_account():
     return {}
 
 
+def voice_account():
+    """Return Omarvoice's pinned account without following App switches."""
+    if not ACCOUNTS_INDEX.is_file():
+        return {}
+    try:
+        index_data = json.loads(ACCOUNTS_INDEX.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    voice_id = index_data.get("voice_account_id")
+    for account in index_data.get("accounts", []):
+        if account.get("id") == voice_id and not account.get("disabled"):
+            return account
+    return {}
+
+
 def token_scopes(access_token):
     """Resolve granted OAuth scopes without printing or persisting the token."""
     if not access_token:
@@ -994,12 +1018,12 @@ def refresh_credential(account_id):
 def voice_auth_status():
     """Report Omarvoice readiness without returning any OAuth material."""
     ensure_storage_migrated()
-    account = current_account()
+    account = voice_account()
     if not account:
         print(json.dumps({
-            "status": "authorization_required",
+            "status": "voice_account_required",
             "ready": False,
-            "message": "请先在 Agent Panel 授权 Antigravity 账号",
+            "message": "请先为 Omarvoice 指定一个固定账号",
         }, ensure_ascii=False))
         return 1
 
@@ -1009,7 +1033,7 @@ def voice_auth_status():
             "status": "authorization_required",
             "ready": False,
             "email": account.get("email") or "",
-            "message": "Agent Panel 当前账号缺少长期授权",
+            "message": "Omarvoice 固定账号缺少长期授权",
         }, ensure_ascii=False))
         return 1
 
@@ -1029,8 +1053,216 @@ def voice_auth_status():
         "status": "ready",
         "ready": True,
         "email": account.get("email") or "",
-        "message": "Agent Panel 长期鉴权已就绪",
+        "message": "Omarvoice 固定账号已就绪",
     }, ensure_ascii=False))
+    return 0
+
+
+def _standalone_token_payload(credential):
+    """Serialize the native token shape accepted by Antigravity standalone."""
+    credential = dict(credential or {})
+    if not credential.get("access_token") or not credential.get("refresh_token"):
+        raise RuntimeError("Omarvoice 凭据不完整")
+    expiry = credential.get("expired") or datetime.now(timezone.utc).isoformat()
+    return {
+        "auth_method": "consumer",
+        "token": {
+            "access_token": credential["access_token"],
+            "expiry": expiry,
+            "refresh_token": credential["refresh_token"],
+            "token_type": credential.get("token_type") or "Bearer",
+        },
+    }
+
+
+def write_omarvoice_credential(credential):
+    """Atomically update Omarvoice's private file-based token store."""
+    token_dir = OMARVOICE_TOKEN_FILE.parent
+    token_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    enforce_mode(OMARVOICE_AUTH_HOME, 0o700)
+    enforce_mode(token_dir, 0o700)
+    atomic_write(
+        OMARVOICE_TOKEN_FILE,
+        json.dumps(
+            _standalone_token_payload(credential),
+            separators=(",", ":"),
+        )
+        + "\n",
+        0o600,
+    )
+
+
+def read_omarvoice_credential():
+    """Read Omarvoice's isolated runtime token without exposing it."""
+    try:
+        payload = json.loads(OMARVOICE_TOKEN_FILE.read_text(encoding="utf-8"))
+    except (OSError, TypeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    token = payload.get("token")
+    token = token if isinstance(token, dict) else payload
+    if not token.get("access_token") or not token.get("refresh_token"):
+        return {}
+
+    credential = {
+        "access_token": token["access_token"],
+        "refresh_token": token["refresh_token"],
+        "token_type": token.get("token_type") or "Bearer",
+        "expired": token.get("expiry") or token.get("expired") or "",
+    }
+    try:
+        expiry = datetime.fromisoformat(
+            str(credential["expired"]).replace("Z", "+00:00")
+        )
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        now_ts = int(time.time())
+        credential["timestamp"] = now_ts * 1000
+        credential["expires_in"] = max(0, int(expiry.timestamp()) - now_ts)
+    except (TypeError, ValueError):
+        pass
+    return credential
+
+
+def absorb_omarvoice_runtime_credential(account):
+    """Preserve a token rotated by Omarvoice's isolated language server."""
+    if not account:
+        return False
+    runtime = read_omarvoice_credential()
+    if not runtime:
+        return False
+
+    credential = load_credential(account.get("id"))
+    credential.update(runtime)
+    granted_scopes = set(str(credential.get("scope") or "").split())
+    try:
+        owner_email = access_token_email(credential.get("access_token"))
+        if not owner_email and credential.get("refresh_token"):
+            credential, granted_scopes = refresh_credential_data(credential)
+            owner_email = access_token_email(credential.get("access_token"))
+    except RuntimeError:
+        return False
+
+    expected_email = str(account.get("email") or credential.get("email") or "")
+    if not owner_email or (
+        expected_email and owner_email.casefold() != expected_email.casefold()
+    ):
+        return False
+    if not granted_scopes:
+        granted_scopes = token_scopes(credential.get("access_token"))
+    credential["email"] = expected_email or owner_email
+    if granted_scopes:
+        credential["scope"] = " ".join(sorted(granted_scopes))
+    save_credential(account.get("id"), credential)
+    return True
+
+
+def sync_voice_account(account):
+    """Refresh and stage one account in Omarvoice's isolated token store."""
+    if not account:
+        return {
+            "status": "voice_account_required",
+            "ready": False,
+            "message": "请先为 Omarvoice 指定一个固定账号",
+        }, 1
+
+    absorb_omarvoice_runtime_credential(account)
+    credential = load_credential(account.get("id"))
+    granted_scopes = set(str(credential.get("scope") or "").split())
+    refreshed = False
+    if credential_needs_refresh(credential):
+        try:
+            credential, granted_scopes = refresh_credential(account.get("id"))
+            refreshed = True
+        except RuntimeError as exc:
+            return {
+                "status": "refresh_failed",
+                "ready": False,
+                "email": account.get("email") or "",
+                "message": str(exc),
+            }, 1
+
+    if AICODE_SCOPE not in granted_scopes:
+        granted_scopes = token_scopes(credential.get("access_token"))
+    if AICODE_SCOPE not in granted_scopes:
+        return {
+            "status": "reauthorize_required",
+            "ready": False,
+            "email": account.get("email") or "",
+            "message": "固定账号缺少 Omarvoice 听写权限，请在 Agent Panel 重新授权",
+        }, 2
+
+    try:
+        write_omarvoice_credential(credential)
+    except (OSError, RuntimeError) as exc:
+        return {
+            "status": "credential_write_failed",
+            "ready": False,
+            "email": account.get("email") or "",
+            "message": f"{exc}，无法更新 Omarvoice 独立凭据",
+        }, 1
+
+    return {
+        "status": "ready",
+        "ready": True,
+        "email": account.get("email") or "",
+        "refreshed": refreshed,
+        "message": "Omarvoice 固定账号凭据已同步",
+    }, 0
+
+
+def bind_voice_account(account_id):
+    """Pin Omarvoice to one registered account without switching the App."""
+    ensure_storage_migrated()
+    try:
+        index_data = json.loads(ACCOUNTS_INDEX.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(json.dumps({
+            "status": "account_index_error",
+            "ready": False,
+            "message": f"无法读取账号索引：{exc}",
+        }, ensure_ascii=False))
+        return 1
+
+    account = next(
+        (
+            item
+            for item in index_data.get("accounts", [])
+            if item.get("id") == account_id and not item.get("disabled")
+        ),
+        None,
+    )
+    if not account:
+        print(json.dumps({
+            "status": "account_not_found",
+            "ready": False,
+            "message": "指定的 Omarvoice 账号不存在或已停用",
+        }, ensure_ascii=False))
+        return 1
+
+    result, exit_code = sync_voice_account(account)
+    if exit_code:
+        print(json.dumps(result, ensure_ascii=False))
+        return exit_code
+
+    index_data["voice_account_id"] = account_id
+    try:
+        atomic_write(
+            ACCOUNTS_INDEX,
+            json.dumps(index_data, indent=2) + "\n",
+            0o600,
+        )
+    except OSError as exc:
+        print(json.dumps({
+            "status": "account_index_write_failed",
+            "ready": False,
+            "message": f"无法保存 Omarvoice 固定账号：{exc}",
+        }, ensure_ascii=False))
+        return 1
+
+    result["pinned"] = True
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 
@@ -1251,9 +1483,9 @@ def absorb_runtime_keyring(account):
 
 
 def voice_auth_sync():
-    """Ensure valid auth and securely hand it to Antigravity's token store."""
+    """Ensure valid auth in Omarvoice's isolated token store."""
     ensure_storage_migrated()
-    result, exit_code = sync_account_to_keyring(current_account())
+    result, exit_code = sync_voice_account(voice_account())
     print(json.dumps(result, ensure_ascii=False))
     return exit_code
 
@@ -2285,6 +2517,8 @@ def oauth_start():
         })
 
     index_data["accounts"] = acc_list
+    if not index_data.get("voice_account_id"):
+        index_data["voice_account_id"] = account_id
     atomic_write(ACCOUNTS_INDEX, json.dumps(index_data, indent=2) + "\n", 0o600)
 
     activation_exit = switch_account(account_id)
@@ -2318,7 +2552,7 @@ def main():
         print(
             "Usage: omarchy-antigravity-ctl "
             "[switch <id> | oauth-client-bootstrap | oauth-start | oauth-cancel | refresh [id] | "
-            "app-auth-status | voice-auth-status | voice-auth-sync]"
+            "app-auth-status | voice-bind <id> | voice-auth-status | voice-auth-sync]"
         )
         return 1
 
@@ -2355,6 +2589,15 @@ def main():
         return voice_auth_status()
     elif cmd == "voice-auth-sync":
         return voice_auth_sync()
+    elif cmd == "voice-bind":
+        if len(sys.argv) < 3:
+            print(json.dumps({
+                "status": "account_id_required",
+                "ready": False,
+                "message": "缺少 Omarvoice 账号 ID",
+            }, ensure_ascii=False))
+            return 1
+        return bind_voice_account(sys.argv[2])
     else:
         print(f"Unknown command: {cmd}")
         return 1

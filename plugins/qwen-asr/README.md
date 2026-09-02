@@ -16,14 +16,18 @@ The transcription path is intentionally split into three readable boundaries:
    language server warm. It captures 16 kHz mono PCM in 200 ms chunks, saves a
    recovery WAV, and streams those chunks while the user is still speaking.
 3. Agent Panel remains the only owner of the account index and long-lived
-   OAuth credential. It refreshes only near token expiry and synchronizes
-   Antigravity's system-keyring entry without returning a token to Omarvoice.
+   OAuth credentials. Omarvoice pins one account by `voice_account_id`, so
+   native Antigravity App account switches do not change dictation identity.
+4. The pinned credential is refreshed only near expiry and staged in a
+   private file-token home used solely by Omarvoice's language server. That
+   process cannot access the desktop Secret Service, so it never overwrites
+   the native App's single system-keyring entry.
 
 The service starts Antigravity's language server without the Electron UI and
 keeps the cloud transcription session active while audio arrives. OAuth
 material is never placed in QML, command-line arguments, transcript history,
-or diagnostics. Runtime state and the Unix socket are private to the desktop
-user.
+or diagnostics. The isolated token file, runtime state, and Unix socket are
+private to the desktop user.
 
 Every transcription session includes a short, static recognition profile for
 mainland-Chinese names, places, organizations, and current expressions, plus
@@ -64,11 +68,17 @@ Prerequisites:
 `ffmpeg` is needed only by the backward-compatible `transcribe <wav>` CLI,
 not by the live push-to-talk path.
 
-Antigravity dictation adds the Google OAuth scope
-`https://www.googleapis.com/auth/aicode`. Accounts authorized before this
-change need one explicit reauthorization. Open the Omarvoice panel, choose
-**重新授权**, complete the browser login, and the readiness row will refresh
-automatically.
+Antigravity dictation requires the Google OAuth scope
+`https://www.googleapis.com/auth/aicode`. Pin a registered account with:
+
+```bash
+~/.config/omarchy/plugins/eipi10.agents/bin/omarchy-antigravity-ctl \
+  voice-bind <account-id>
+```
+
+Omarvoice does not expose a second browser-login path. If the pinned account
+was authorized before the `aicode` scope was added, reauthorize that account
+from Agent Panel and then refresh Omarvoice's status row.
 
 ## Usage
 

@@ -206,7 +206,7 @@ Panel {
         if (mouse.button === Qt.LeftButton) {
           if (!controller.authReady) {
             controller.loadAuthStatus()
-            controller.fail(controller.authMessage || "Agent Panel 鉴权尚未就绪", "auth")
+            controller.fail(controller.authMessage || "Omarvoice 固定账号尚未就绪", "auth")
             root.open()
             return
           }
@@ -300,7 +300,7 @@ Panel {
                    : (root.hasError ? "上次出错 · 右键查看"
                       : (controller.authReady
                          ? ("按住录音 · 松开上屏 · " + controller.currentShortcutDisplay)
-                         : "Agent Panel 鉴权未就绪 · 右键处理")))))
+                         : "Omarvoice 固定账号未就绪 · 右键检查")))))
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
@@ -786,18 +786,16 @@ Panel {
 
       PanelSeparator {}
 
-      // Agent Panel owns long-lived OAuth; Omarvoice only reports readiness.
+      // Agent Panel owns the pinned credential; Omarvoice only refreshes status.
       RowLayout {
         width: parent.width
         spacing: Style.space(8)
 
         Text {
           text: controller.authReady ? "󰄬"
-            : (controller.authState === "checking" || controller.authState === "authorizing"
-               ? "󰔟" : "󰅚")
+            : (controller.authState === "checking" ? "󰔟" : "󰅚")
           color: controller.authReady ? root.accent
-            : (controller.authState === "checking" || controller.authState === "authorizing"
-               ? root.dim : root.urgent)
+            : (controller.authState === "checking" ? root.dim : root.urgent)
           font.family: root.fontFamily
           font.pixelSize: Style.space(16)
         }
@@ -807,7 +805,7 @@ Panel {
           spacing: 1
 
           Text {
-            text: "Agent Panel 长期鉴权"
+            text: "Omarvoice 固定账号"
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
@@ -827,20 +825,11 @@ Panel {
 
         Button {
           id: authButton
-          text: controller.authReady ? "刷新"
-            : (controller.authState === "authorizing" || controller.authState === "checking"
-               ? "检查" : "重新授权")
+          text: controller.authState === "checking" ? "检查" : "刷新"
           bordered: true
           foreground: controller.authReady ? root.foreground : root.accent
           fontFamily: root.fontFamily
-          onClicked: {
-            if (controller.authReady || controller.authState === "authorizing"
-                || controller.authState === "checking") {
-              controller.loadAuthStatus()
-            } else {
-              controller.beginAuthorization()
-            }
-          }
+          onClicked: controller.loadAuthStatus()
         }
       }
 

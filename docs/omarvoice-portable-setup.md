@@ -7,7 +7,7 @@ Omarvoice is deployed as reproducible code plus machine-local authorization:
 - Omarchy installs the desktop/audio dependencies.
 - The Antigravity AUR package provides the supported `language_server`.
 - Each machine completes its own Google browser authorization and stores its
-  own refresh token and keyring entry.
+  own refresh token plus a private Omarvoice file-token home.
 
 No access token or refresh token is copied between machines.
 
@@ -37,9 +37,10 @@ The setup performs these steps:
    engine, using committed SHA-256 fingerprints to select the correct values.
 7. Opens Google authorization in the default browser and waits on a
    loopback-only callback.
-8. Stores the long-lived account credential with mode `0600`, synchronizes the
-   native Antigravity token shape to the desktop keyring, warms Omarvoice, and
-   runs an end-to-end local health check.
+8. Stores the long-lived account credential with mode `0600`, pins that
+   account for Omarvoice, writes the native Antigravity token shape to an
+   isolated file-token home, warms Omarvoice, and runs an end-to-end local
+   health check.
 
 The repository contains only OAuth client fingerprints. It does not contain
 the extracted client secret, account credentials, audio, transcripts, or
@@ -73,8 +74,8 @@ git pull --ff-only
 ```
 
 Running setup repeatedly is intentional. Package installation, plugin links,
-bar placement, the managed shortcut block, OAuth client preparation, keyring
-sync, and service warmup are all idempotent.
+bar placement, the managed shortcut block, OAuth client preparation, private
+token sync, and service warmup are all idempotent.
 
 ## Persisted state
 
@@ -85,6 +86,7 @@ These files stay local to each machine:
 ~/.config/omarchy/agents/antigravity/accounts/
 ~/.config/omarchy/agents/antigravity/auth/
 ~/.config/omarchy/agents/antigravity/oauth.json
+~/.local/share/omarvoice-antigravity/home/.gemini/jetski-standalone-oauth-token
 ~/.config/XiezhaoPan/qwen-asr-qt.conf
 ~/.local/share/XiezhaoPan/qwen-asr-qt/
 ```
@@ -100,4 +102,3 @@ unknown OAuth client. It never guesses between binary candidates. To support a
 new release, verify its OAuth client against a working local installation and
 add only the corresponding SHA-256 fingerprints to
 `omarchy-antigravity-ctl`.
-

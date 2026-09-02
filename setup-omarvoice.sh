@@ -152,8 +152,8 @@ health_check() {
   elif [[ -x "$VOICE_BRIDGE" ]]; then
     daemon_status="$("$VOICE_BRIDGE" daemon-status 2>/dev/null || true)"
     if [[ -n "$daemon_status" ]] \
-      && jq -e '.ready == true and .protocol_version == 8' >/dev/null 2>&1 <<<"$daemon_status"; then
-      note "Omarvoice resident service: ready (protocol 8)"
+      && jq -e '.ready == true and .protocol_version == 9' >/dev/null 2>&1 <<<"$daemon_status"; then
+      note "Omarvoice resident service: ready (protocol 9)"
     else
       note "Omarvoice resident service: not ready"
       failures=$((failures + 1))
@@ -261,7 +261,7 @@ if "$force_auth" || ! json_ready "$auth_status"; then
   note "complete the Google authorization page opened in your browser"
   "$AGENT_CTL" oauth-start
 else
-  note "an active long-lived account already exists; keeping it"
+  note "a pinned Omarvoice account already exists; keeping it"
 fi
 "$AGENT_CTL" voice-auth-sync
 

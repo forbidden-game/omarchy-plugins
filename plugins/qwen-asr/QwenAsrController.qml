@@ -44,10 +44,9 @@ Item {
   property string errorKind: "" // "" | offline | input | recording | auth | asr
   property string lastTranscript: ""
   property bool authReady: false
-  property string authState: "checking" // checking | ready | authorizing | reauthorize | error
-  property string authMessage: "正在检查 Agent Panel 鉴权…"
+  property string authState: "checking" // checking | ready | reauthorize | error
+  property string authMessage: "正在检查 Omarvoice 固定账号…"
   property string authAccount: ""
-  property int authPollCount: 0
   property bool serviceReady: false
   property string recordingRecoveryReason: ""
   property int elapsedSec: 0
@@ -220,19 +219,9 @@ Item {
 
   function loadAuthStatus() {
     if (authStatusProc.running) return
-    root.authState = root.authState === "authorizing" ? "authorizing" : "checking"
+    root.authState = "checking"
     authStatusProc.command = [root.bridgeBinary, "status"]
     authStatusProc.running = true
-  }
-
-  function beginAuthorization() {
-    if (authorizeProc.running) return
-    root.authReady = false
-    root.authState = "authorizing"
-    root.authMessage = "等待浏览器授权…"
-    root.authPollCount = 0
-    authorizeProc.command = [root.bridgeBinary, "authorize"]
-    authorizeProc.running = true
   }
 
   function warmService() {
@@ -300,7 +289,7 @@ Item {
 
     if (!root.authReady) {
       root.loadAuthStatus()
-      root.fail(root.authMessage || "Agent Panel 鉴权尚未就绪", "auth")
+      root.fail(root.authMessage || "Omarvoice 固定账号尚未就绪", "auth")
       return
     }
 
@@ -912,50 +901,17 @@ Item {
       root.authReady = code === 0 && result && result.ready === true
       root.authAccount = result ? String(result.email || "") : ""
       root.authMessage = result
-        ? String(result.message || "Agent Panel 鉴权尚未就绪")
-        : "无法读取 Agent Panel 鉴权状态"
+        ? String(result.message || "Omarvoice 固定账号尚未就绪")
+        : "无法读取 Omarvoice 固定账号状态"
       if (root.authReady) {
         root.authState = "ready"
-        authPollTimer.stop()
         root.warmService()
       } else if (result && (result.code === "reauthorize_required"
                            || result.status === "reauthorize_required")) {
-        root.authState = root.authState === "authorizing" ? "authorizing" : "reauthorize"
-      } else {
-        root.authState = root.authState === "authorizing" ? "authorizing" : "error"
-      }
-    }
-  }
-
-  Process {
-    id: authorizeProc
-    stdout: StdioCollector { waitForEnd: true }
-    onExited: function(code) {
-      if (code !== 0) {
-        root.authState = "error"
-        root.authMessage = "无法启动 Agent Panel 授权"
-        return
-      }
-      root.authState = "authorizing"
-      root.authMessage = "授权链接已复制；完成登录后会自动刷新"
-      root.authPollCount = 0
-      authPollTimer.restart()
-    }
-  }
-
-  Timer {
-    id: authPollTimer
-    interval: 5000
-    repeat: true
-    onTriggered: {
-      root.authPollCount++
-      if (root.authPollCount > 60) {
-        authPollTimer.stop()
         root.authState = "reauthorize"
-        root.authMessage = "授权等待超时，请重试"
-        return
+      } else {
+        root.authState = "error"
       }
-      root.loadAuthStatus()
     }
   }
 

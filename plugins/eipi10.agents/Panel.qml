@@ -147,6 +147,11 @@ Panel {
     onExited: root.appAuthChecking = false
   }
 
+  Process {
+    id: verificationProc
+    running: false
+  }
+
   function switchAccount(accId) {
     if (accountSwitching || !accId) return
     accountSwitching = true
@@ -218,6 +223,12 @@ Panel {
     if (appAuthProc.running) return
     appAuthChecking = true
     appAuthProc.running = true
+  }
+
+  function openAccountVerification(url) {
+    if (!url || verificationProc.running) return
+    verificationProc.command = ["omarchy", "launch", "browser", url]
+    verificationProc.running = true
   }
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
@@ -460,9 +471,12 @@ Panel {
             switching: root.accountSwitching
             currentAppStatusKnown: String(root.appAuthState.status || "") !== ""
             currentAppReady: root.appAuthState.ready === true
+            verificationUrl: String(root.appAuthState.verification_url || "")
             statusMessage: root.accountSwitchMessage !== ""
               ? root.accountSwitchMessage
-              : String(root.appAuthState.message || "")
+              : (String(root.appAuthState.verification_url || "") !== ""
+                 ? "当前账号尚未通过 Google 资格验证。点 VERIFY，在 Chrome 中明确选择这个账号完成验证。"
+                 : String(root.appAuthState.message || ""))
             statusError: root.accountSwitchMessage !== ""
               ? root.accountSwitchError
               : (String(root.appAuthState.status || "") !== ""
@@ -475,6 +489,7 @@ Panel {
             fontFamily: root.fontFamily
             onSwitchRequested: function(accId) { root.switchAccount(accId) }
             onAddAccountRequested: function() { root.startOAuth() }
+            onVerifyRequested: function(url) { root.openAccountVerification(url) }
           }
 
           // ---------- OAuth Silent Link Box ----------

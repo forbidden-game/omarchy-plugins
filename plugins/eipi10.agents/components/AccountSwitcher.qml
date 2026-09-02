@@ -10,6 +10,7 @@ Column {
   property bool switching: false
   property bool currentAppStatusKnown: false
   property bool currentAppReady: false
+  property string verificationUrl: ""
   property string statusMessage: ""
   property bool statusError: false
   property double nowMs: Date.now()
@@ -21,6 +22,7 @@ Column {
 
   signal switchRequested(string accountId)
   signal addAccountRequested()
+  signal verifyRequested(string url)
 
   function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
 
@@ -283,7 +285,7 @@ Column {
                 root.currentAppReady ? root.accent : (
                   root.currentAppStatusKnown ? root.urgent : root.foreground
                 ),
-                0.15
+                verifyHover.containsMouse ? 0.25 : 0.15
               )
               anchors.verticalCenter: parent.verticalCenter
               anchors.right: parent.right
@@ -300,6 +302,15 @@ Column {
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
+              }
+
+              MouseArea {
+                id: verifyHover
+                anchors.fill: parent
+                visible: !root.currentAppReady && root.verificationUrl !== ""
+                hoverEnabled: visible
+                cursorShape: visible ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: root.verifyRequested(root.verificationUrl)
               }
             }
 

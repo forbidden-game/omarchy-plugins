@@ -1,6 +1,10 @@
 .pragma library
 
 var DEFAULT_RATES = {
+  // OpenAI standard USD per 1M tokens (verified 2026-09-05):
+  // https://developers.openai.com/api/docs/models/gpt-6-astra
+  "gpt-6-astra": { input: 10.00, output: 50.00, cacheRead: 1.00, cacheWrite: 12.50 },
+
   // OpenAI GPT-5.6 Family (Official OpenAI Pricing: Sol $4/$20, Terra $2/$12, Luna $0.20/$1.20)
   "gpt-5.6-sol": { input: 4.00, output: 20.00, cacheRead: 0.40, cacheWrite: 0.0 },
   "gpt-5.6-sol-372k": { input: 8.00, output: 40.00, cacheRead: 0.80, cacheWrite: 0.0 },

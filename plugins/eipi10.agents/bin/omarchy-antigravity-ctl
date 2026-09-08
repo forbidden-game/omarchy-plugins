@@ -10,6 +10,7 @@ browser loopback OAuth authorization, token auto-refresh, and live Google Cloud 
 
 import http.server
 import errno
+import fcntl
 import hashlib
 import json
 import mmap
@@ -808,7 +809,8 @@ def trigger_collector_update():
     update_bin = HOME / ".config" / "omarchy" / "plugins" / "eipi10.agents" / "bin" / "omarchy-agent-usage-update"
     if update_bin.is_file():
         try:
-            subprocess.Popen([str(update_bin), "antigravity"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Publishing a completed refresh must never start another network refresh.
+            subprocess.Popen([str(update_bin), "antigravity", "--cached-only"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
 
@@ -1990,9 +1992,20 @@ def fetch_account_quotas(acc_data, account_file=None):
     return True
 
 
-def refresh_all_accounts(force=False):
-    """Refresh cloud quotas for all active accounts."""
+def refresh_all_accounts(force=False, target_id=None):
+    """Serialize quota requests and retain retry delays even after interruption."""
     ensure_storage_migrated()
+    lock_path = ANTIGRAVITY_DIR / "quota-refresh.lock"
+    with lock_path.open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return _refresh_accounts_locked(force, target_id)
+
+
+def _refresh_accounts_locked(force, target_id):
+    """Refresh cloud quotas for all active accounts."""
     if not ACCOUNTS_INDEX.is_file():
         return False
 
@@ -2005,6 +2018,13 @@ def refresh_all_accounts(force=False):
     current_id = index_data.get("current_account_id")
     now_ts = int(time.time())
     updated_any = False
+    state_path = ANTIGRAVITY_DIR / "quota-refresh-state.json"
+    try:
+        retry_state = json.loads(state_path.read_text())
+        if not isinstance(retry_state, dict):
+            retry_state = {}
+    except (OSError, ValueError):
+        retry_state = {}
 
     # Prioritize current account first
     sorted_accounts = sorted(accounts, key=lambda a: 0 if a.get("id") == current_id else 1)
@@ -2012,6 +2032,8 @@ def refresh_all_accounts(force=False):
     for stub in sorted_accounts:
         acc_id = stub.get("id")
         if not acc_id or stub.get("disabled"):
+            continue
+        if target_id is not None and acc_id != target_id:
             continue
         acc_file = ACCOUNTS_DIR / f"{acc_id}.json"
         if not acc_file.is_file():
@@ -2024,10 +2046,28 @@ def refresh_all_accounts(force=False):
         quota = acc_data.get("quota") or {}
         last_updated = int(quota.get("last_updated") or 0)
 
-        # Refresh if forced or older than 60 seconds
-        if force or (now_ts - last_updated > 60):
-            if fetch_account_quotas(acc_data, acc_file):
-                updated_any = True
+        retry = retry_state.get(acc_id) or {}
+        # Even manual refreshes respect failure cooldowns; they only bypass
+        # the successful-data cache. Repeated clicks cannot flood the API.
+        if now_ts < retry.get("retry_after", 0):
+            continue
+        if not force and now_ts - last_updated <= 60:
+            continue
+
+        failures = min(int(retry.get("failures", 0)) + 1, 5)
+        retry_state[acc_id] = {"failures": failures, "retry_after": int(time.time()) + 300}
+        # Write before I/O: a timeout or killed collector still leaves a cooldown.
+        atomic_write(state_path, json.dumps(retry_state) + "\n")
+        try:
+            succeeded = fetch_account_quotas(acc_data, acc_file)
+        except Exception:
+            succeeded = False
+        if succeeded:
+            retry_state.pop(acc_id, None)
+            updated_any = True
+        else:
+            retry_state[acc_id]["retry_after"] = int(time.time()) + min(60 * 2 ** (failures - 1), 900)
+        atomic_write(state_path, json.dumps(retry_state) + "\n")
 
     return updated_any
 
@@ -2571,18 +2611,11 @@ def main():
     elif cmd == "oauth-cancel":
         return oauth_cancel()
     elif cmd == "refresh":
-        target_id = sys.argv[2] if len(sys.argv) > 2 else None
-        if target_id:
-            target_file = ACCOUNTS_DIR / f"{target_id}.json"
-            if target_file.is_file():
-                try:
-                    data = json.loads(target_file.read_text(encoding="utf-8"))
-                    fetch_account_quotas(data, target_file)
-                except Exception:
-                    pass
-        else:
-            refresh_all_accounts(force=True)
-        trigger_collector_update()
+        options = sys.argv[2:]
+        target_id = next((arg for arg in options if not arg.startswith("--")), None)
+        refresh_all_accounts(force="--if-needed" not in options, target_id=target_id)
+        if "--no-update" not in options:
+            trigger_collector_update()
         print(json.dumps({"status": "refreshed"}))
         return 0
     elif cmd == "voice-auth-status":

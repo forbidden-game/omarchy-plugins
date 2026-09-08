@@ -49,6 +49,16 @@ written by `omarchy-agent-usage-update`. That command runs one
 on its refresh timer and whenever you ask for a refresh, and picks up any
 record that lands in the directory regardless of who wrote it.
 
+Antigravity quota requests use a process lock so overlapping collectors cannot
+fetch in parallel. Successful data is cached for 60 seconds; failed requests
+back off from 60 seconds to at most 15 minutes, including manual refreshes.
+An interrupted request leaves a five-minute cooldown. These retry records are
+separate from the last successful quota timestamp. Refreshing from a collector
+never starts another collector; controller-initiated publication uses
+`omarchy-agent-usage-update antigravity --cached-only` to read stored data
+without issuing requests. Regression tests run with
+`python3 -m unittest discover -s plugins/eipi10.agents/tests` from the repository root.
+
 Adding an agent therefore never touches this plugin: ship a collector that
 prints the record contract (see the `claude` and `codex` collectors in
 `bin/`), and the panel gains a tab. An `assets/<id>.svg` mark is optional —
